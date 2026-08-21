@@ -3,6 +3,19 @@ name: Build Live ISOs
 
 on:
   workflow_dispatch:
+    inputs:
+      IMAGE_NAME:
+        description: 'Имя образа (например, bazzite-deck)'
+        required: true
+        default: 'bazzite-deck'
+      IMAGE_TAG:
+        description: 'Версия (например, 43.20260420)'
+        required: true
+        default: '43.20260420'
+      FEDORA_MAJOR_VERSION:
+        description: 'Версия Fedora (укажите 43)'
+        required: true
+        default: '43'
   workflow_call:
   push:
     branches: [testing]
