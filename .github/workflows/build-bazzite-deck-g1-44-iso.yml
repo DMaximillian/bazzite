@@ -303,7 +303,6 @@ jobs:
           sudo buildah bud \
             --pull \
             --layers=false \
-            --squash \
             --build-arg BASE_TAG="${{ inputs.base_tag }}" \
             -t "${{ steps.meta.outputs.image_ref }}" \
             g1-image
