@@ -1,4 +1,4 @@
-name: Build Bazzite Deck G1 ISO (Fedora 44)
+name: Build Bazzite Deck G1 ISO (Fedora 44, rechunked)
 
 on:
   workflow_dispatch:
@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  packages: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
@@ -44,14 +45,15 @@ jobs:
         with:
           target-dir: /var/lib/containers
 
-      - name: Prepare derived image metadata
+      - name: Prepare image metadata
         id: meta
         shell: bash
         run: |
           set -euo pipefail
-          IMAGE_NAME="bazzite-deck-g1-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          IMAGE_REPO="ttl.sh"
-          IMAGE_TAG="24h"
+          OWNER_LC="${GITHUB_REPOSITORY_OWNER,,}"
+          IMAGE_NAME="bazzite-deck-g1"
+          IMAGE_REPO="ghcr.io/${OWNER_LC}"
+          IMAGE_TAG="run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           IMAGE_REF="${IMAGE_REPO}/${IMAGE_NAME}:${IMAGE_TAG}"
 
           echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
@@ -66,17 +68,13 @@ jobs:
           mkdir -p g1-image
 
           cat > g1-image/61-sensor-local.hwdb <<'EOF'
-          # OneXPlayer G1 A — bmi260 accelerometer is mounted 180° vs the panel,
-          # so auto-rotate reads landscape as "bottom-up" and flips to portrait.
+          # OneXPlayer G1 A — bmi260 accelerometer is mounted 180° vs the panel.
           sensor:modalias:acpi:BMI0160*:dmi:*:svnONE-NETBOOK:pnONEXPLAYERG1A:*
            ACCEL_MOUNT_MATRIX=-1, 0, 0; 0, -1, 0; 0, 0, 1
           EOF
 
           cat > g1-image/62-amira-kbd-fkeys.hwdb <<'EOF'
-          # OneXPlayer G1 A detachable keyboard's touchpad (AMIRA-KEYBOAR, USB 6080:8060)
-          # emits F13/F14/F17 when you toggle the touchpad between mouse and keypad mode.
-          # F17 trips GNOME's Settings launcher. These are spurious notification keys; the
-          # mouse<->keypad switch itself is firmware-internal, so disabling them is safe.
+          # AMIRA keyboard mode-toggle emits spurious F13/F14/F17.
           evdev:input:b0003v6080p8060*
            KEYBOARD_KEY_70068=reserved
            KEYBOARD_KEY_70069=reserved
@@ -84,19 +82,14 @@ jobs:
           EOF
 
           cat > g1-image/71-controller-access.rules <<'EOF'
-          # OneXPlayer G1 A: the built-in Xbox pad's input nodes (js0 / eventN) can come up
-          # mode 000 with the uaccess ACL masked to "---", so no user app (Steam included)
-          # can read the controller.
+          # Ensure handheld gamepad nodes are readable by the logged-in user.
           SUBSYSTEM=="input", ENV{ID_INPUT_JOYSTICK}=="1", TAG+="uaccess", MODE="0660", GROUP="input"
           KERNEL=="js[0-9]*", SUBSYSTEM=="input", TAG+="uaccess", MODE="0660", GROUP="input"
           EOF
 
           cat > g1-image/99-usb-autosuspend.rules <<'EOF'
-          # Disable autosuspend for GenesysLogic USB hub (causes freeze/disconnect on G1)
           ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="05e3", ATTR{idProduct}=="0610", ATTR{power/control}="on", ATTR{power/autosuspend_delay_ms}="0"
-          # Broadly disable for all USB hubs to prevent input device drops
           ACTION=="add", SUBSYSTEM=="usb", ATTR{bDeviceClass}=="09", ATTR{power/control}="on"
-          # Keep AMIRA receiver powered
           ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="6080", ATTR{idProduct}=="8060", ATTR{power/control}="on", ATTR{power/autosuspend_delay_ms}="0"
           EOF
 
@@ -135,15 +128,9 @@ jobs:
           CONF = "/etc/oxp-rgb.conf"
           VID, PID = "1A2C", "B001"
           EFFECTS = {
-              "aurora": 0x01,
-              "flowing": 0x03,
-              "neon": 0x05,
-              "dreamy": 0x07,
-              "sun": 0x08,
-              "cyberpunk": 0x09,
-              "sunset": 0x0B,
-              "colorful": 0x0C,
-              "monster_woke": 0x0D,
+              "aurora": 0x01, "flowing": 0x03, "neon": 0x05, "dreamy": 0x07,
+              "sun": 0x08, "cyberpunk": 0x09, "sunset": 0x0B,
+              "colorful": 0x0C, "monster_woke": 0x0D,
           }
           BRIGHT = {"low": 0x01, "medium": 0x03, "high": 0x04}
 
@@ -296,7 +283,7 @@ jobs:
             -v "${TEMP_FLATPAK_INSTALL_DIR}:/temp_flatpak_install_dir" \
             "${image}" /temp_flatpak_install_dir/script.sh
 
-      - name: Build derived G1 image with buildah
+      - name: Build derived G1 image
         shell: bash
         run: |
           set -euxo pipefail
@@ -304,17 +291,54 @@ jobs:
             --pull \
             --layers=false \
             --build-arg BASE_TAG="${{ inputs.base_tag }}" \
-            -t "${{ steps.meta.outputs.image_ref }}" \
+            -t localhost/derived-g1-img \
             g1-image
 
-      - name: Push derived image to ttl.sh
+      - name: Rechunk derived image
         shell: bash
         run: |
           set -euxo pipefail
-          sudo buildah push \
-            "${{ steps.meta.outputs.image_ref }}" \
+          sudo buildah unshare bash -euo pipefail -c '
+            container=$(buildah from localhost/derived-g1-img)
+            mnt=$(buildah mount "$container")
+            rm -rf "$mnt"/run/.* "$mnt"/run/* "$mnt"/tmp/.* "$mnt"/tmp/* || true
+            buildah umount "$container"
+            buildah commit --identity-label=false --rm "$container" localhost/derived-g1-img
+          '
+
+          RECHUNK_DIR="$(mktemp -d)"
+          echo "RECHUNK_DIR=${RECHUNK_DIR}" >> "$GITHUB_ENV"
+
+          sudo podman run --rm \
+            --pull=never \
+            --privileged \
+            --mount=type=image,src=localhost/derived-g1-img,target=/rpm-ostree \
+            --volume "${RECHUNK_DIR}:/run/out:Z" \
+            --entrypoint /usr/bin/rpm-ostree \
+            localhost/derived-g1-img \
+            compose build-chunked-oci \
+            --bootc --max-layers 127 --format-version 2 \
+            --rootfs /rpm-ostree \
+            --output oci-archive:/run/out/chunked.oci
+
+          sudo podman rmi -f localhost/derived-g1-img || true
+          CHUNKED=$(sudo podman pull "oci-archive:${RECHUNK_DIR}/chunked.oci")
+          sudo podman tag "${CHUNKED}" localhost/chunked-g1-img
+
+      - name: Login to GHCR
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.GITHUB_TOKEN }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+          echo "${{ secrets.GITHUB_TOKEN }}" | sudo buildah login -u "${{ github.actor }}" --password-stdin ghcr.io
+
+      - name: Push rechunked image to GHCR
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo skopeo copy \
+            containers-storage:localhost/chunked-g1-img \
             "docker://${{ steps.meta.outputs.image_ref }}"
-          sleep 15
 
       - name: Setup Bazzite Repo
         shell: bash
