@@ -1,0 +1,337 @@
+name: Build Bazzite Deck G1 ISO (Fedora 44)
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_tag:
+        description: "Base bazzite-deck image tag"
+        required: true
+        default: "stable-44"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  build-g1-iso:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+
+      - name: Checkout Repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          submodules: recursive
+
+      - name: Prepare derived image metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE_NAME="bazzite-deck-g1-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          IMAGE_REPO="ttl.sh"
+          IMAGE_TAG="24h"
+          IMAGE_REF="${IMAGE_REPO}/${IMAGE_NAME}:${IMAGE_TAG}"
+
+          echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "image_repo=${IMAGE_REPO}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "image_ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
+
+      - name: Create G1 overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p g1-image
+
+          cat > g1-image/61-sensor-local.hwdb <<'EOF'
+          # OneXPlayer G1 A — bmi260 accelerometer is mounted 180° vs the panel,
+          # so auto-rotate reads landscape as "bottom-up" and flips to portrait.
+          sensor:modalias:acpi:BMI0160*:dmi:*:svnONE-NETBOOK:pnONEXPLAYERG1A:*
+           ACCEL_MOUNT_MATRIX=-1, 0, 0; 0, -1, 0; 0, 0, 1
+          EOF
+
+          cat > g1-image/62-amira-kbd-fkeys.hwdb <<'EOF'
+          # OneXPlayer G1 A detachable keyboard's touchpad (AMIRA-KEYBOAR, USB 6080:8060)
+          # emits F13/F14/F17 when you toggle the touchpad between mouse and keypad mode.
+          # F17 trips GNOME's Settings launcher. These are spurious notification keys; the
+          # mouse<->keypad switch itself is firmware-internal, so disabling them is safe.
+          evdev:input:b0003v6080p8060*
+           KEYBOARD_KEY_70068=reserved
+           KEYBOARD_KEY_70069=reserved
+           KEYBOARD_KEY_7006c=reserved
+          EOF
+
+          cat > g1-image/71-controller-access.rules <<'EOF'
+          # OneXPlayer G1 A: the built-in Xbox pad's input nodes (js0 / eventN) can come up
+          # mode 000 with the uaccess ACL masked to "---", so no user app (Steam included)
+          # can read the controller.
+          SUBSYSTEM=="input", ENV{ID_INPUT_JOYSTICK}=="1", TAG+="uaccess", MODE="0660", GROUP="input"
+          KERNEL=="js[0-9]*", SUBSYSTEM=="input", TAG+="uaccess", MODE="0660", GROUP="input"
+          EOF
+
+          cat > g1-image/99-usb-autosuspend.rules <<'EOF'
+          # Disable autosuspend for GenesysLogic USB hub (causes freeze/disconnect on G1)
+          ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="05e3", ATTR{idProduct}=="0610", ATTR{power/control}="on", ATTR{power/autosuspend_delay_ms}="0"
+          # Broadly disable for all USB hubs to prevent input device drops
+          ACTION=="add", SUBSYSTEM=="usb", ATTR{bDeviceClass}=="09", ATTR{power/control}="on"
+          # Keep AMIRA receiver powered
+          ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="6080", ATTR{idProduct}=="8060", ATTR{power/control}="on", ATTR{power/autosuspend_delay_ms}="0"
+          EOF
+
+          cat > g1-image/usb-hub-poweron.sh <<'EOF'
+          #!/usr/bin/bash
+          set -euo pipefail
+          udevadm settle --timeout=60 || true
+          for d in /sys/bus/usb/devices/*/power/control; do
+              echo on > "$d" 2>/dev/null || true
+          done
+          EOF
+
+          cat > g1-image/usb-hub-poweron.service <<'EOF'
+          [Unit]
+          Description=Wait for USB devices then force hubs to stay powered
+          Before=gdm.service display-manager.service
+          After=systemd-udevd.service
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/usr/local/bin/usb-hub-poweron.sh
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          cat > g1-image/oxp-rgb.py <<'EOF'
+          #!/usr/bin/env python3
+          import configparser
+          import glob
+          import os
+          import sys
+          import time
+
+          CONF = "/etc/oxp-rgb.conf"
+          VID, PID = "1A2C", "B001"
+          EFFECTS = {
+              "aurora": 0x01,
+              "flowing": 0x03,
+              "neon": 0x05,
+              "dreamy": 0x07,
+              "sun": 0x08,
+              "cyberpunk": 0x09,
+              "sunset": 0x0B,
+              "colorful": 0x0C,
+              "monster_woke": 0x0D,
+          }
+          BRIGHT = {"low": 0x01, "medium": 0x03, "high": 0x04}
+
+          def gen_cmd(cid, cmd, idx=0x01, size=64):
+              base = bytes([cid, 0x3F, idx]) + bytes(cmd)
+              return base + bytes([0] * (size - len(base) - 2)) + bytes([0x3F, cid])
+
+          def gen_brightness(side, enabled, bc):
+              return gen_cmd(0xB8, [0xFD, side, 0x02, 1 if enabled else 0, 0x05, bc])
+
+          def gen_rgb_solid(r, g, b, side=0):
+              return gen_cmd(0xB8, [0xFE, side, 0x02] + 18 * [r, g, b] + [r, g])
+
+          def gen_rgb_mode(mc):
+              return gen_cmd(0xB8, [mc, 0x00, 0x02])
+
+          def find_dev():
+              for hr in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+                  try:
+                      uevent = open(os.path.join(hr, "device/uevent")).read().upper()
+                  except OSError:
+                      continue
+                  if VID in uevent and PID in uevent:
+                      return "/dev/" + os.path.basename(hr)
+              return None
+
+          def main():
+              config = configparser.ConfigParser()
+              config.read(CONF)
+              rgb = config["rgb"] if config.has_section("rgb") else {}
+              mode = rgb.get("mode", "effect")
+              bc = BRIGHT.get(rgb.get("brightness", "high"), 0x04)
+
+              dev = find_dev()
+              if not dev:
+                  print("OXP RGB device not found", file=sys.stderr)
+                  sys.exit(1)
+
+              fd = os.open(dev, os.O_RDWR)
+
+              def write_cmd(cmd):
+                  os.write(fd, bytes(cmd))
+                  time.sleep(0.08)
+
+              write_cmd(gen_brightness(0, True, bc))
+              if mode == "solid":
+                  r = int(rgb.get("r", 0))
+                  g = int(rgb.get("g", 255))
+                  b = int(rgb.get("b", 0))
+                  for side in (0x00, 0x01, 0x02):
+                      write_cmd(gen_rgb_solid(r, g, b, side=side))
+              else:
+                  effect = rgb.get("effect", "aurora")
+                  write_cmd(gen_rgb_mode(EFFECTS.get(effect, 0x01)))
+
+              os.close(fd)
+
+          if __name__ == "__main__":
+              main()
+          EOF
+
+          cat > g1-image/oxp-rgb.conf <<'EOF'
+          [rgb]
+          mode = effect
+          effect = aurora
+          brightness = high
+          r = 0
+          g = 255
+          b = 0
+          EOF
+
+          cat > g1-image/oxp-rgb-apply.sh <<'EOF'
+          #!/usr/bin/bash
+          set -euo pipefail
+          for _ in $(seq 1 30); do
+              if /usr/local/bin/oxp-rgb.py; then
+                  exit 0
+              fi
+              sleep 2
+          done
+          exit 0
+          EOF
+
+          cat > g1-image/oxp-rgb.service <<'EOF'
+          [Unit]
+          Description=OneXPlayer G1 controller RGB workaround
+          After=graphical.target
+          Wants=graphical.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/oxp-rgb-apply.sh
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          cat > g1-image/Containerfile <<'EOF'
+          ARG BASE_TAG=stable-44
+          FROM ghcr.io/ublue-os/bazzite-deck:${BASE_TAG}
+
+          COPY 61-sensor-local.hwdb /usr/lib/udev/hwdb.d/61-sensor-local.hwdb
+          COPY 62-amira-kbd-fkeys.hwdb /usr/lib/udev/hwdb.d/62-amira-kbd-fkeys.hwdb
+          COPY 71-controller-access.rules /usr/lib/udev/rules.d/71-controller-access.rules
+          COPY 99-usb-autosuspend.rules /usr/lib/udev/rules.d/99-usb-autosuspend.rules
+
+          COPY usb-hub-poweron.sh /usr/local/bin/usb-hub-poweron.sh
+          COPY usb-hub-poweron.service /usr/lib/systemd/system/usb-hub-poweron.service
+
+          COPY oxp-rgb.py /usr/local/bin/oxp-rgb.py
+          COPY oxp-rgb-apply.sh /usr/local/bin/oxp-rgb-apply.sh
+          COPY oxp-rgb.service /usr/lib/systemd/system/oxp-rgb.service
+          COPY oxp-rgb.conf /usr/etc/oxp-rgb.conf
+
+          RUN chmod 0755 \
+                /usr/local/bin/usb-hub-poweron.sh \
+                /usr/local/bin/oxp-rgb.py \
+                /usr/local/bin/oxp-rgb-apply.sh \
+           && mkdir -p /usr/lib/systemd/system/multi-user.target.wants /usr/etc \
+           && ln -sf ../usb-hub-poweron.service /usr/lib/systemd/system/multi-user.target.wants/usb-hub-poweron.service \
+           && ln -sf ../oxp-rgb.service /usr/lib/systemd/system/multi-user.target.wants/oxp-rgb.service \
+           && (systemd-hwdb update || udevadm hwdb --update || true)
+          EOF
+
+      - name: Determine Flatpak Dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          image="ghcr.io/ublue-os/bazzite-deck:${{ inputs.base_tag }}"
+          TEMP_FLATPAK_INSTALL_DIR=$(mktemp -d -p "${{ github.workspace }}" flatpak.XXX)
+          FLATPAK_REFS_DIR="${{ github.workspace }}/installer/kde_flatpaks"
+          FLATPAK_REFS_DIR_LIST=$(cat "${FLATPAK_REFS_DIR}"/* | tr '\n' ' ')
+
+          cat > "${TEMP_FLATPAK_INSTALL_DIR}/script.sh" <<EOF
+          mkdir -p /flatpak/flatpak /flatpak/triggers
+          mkdir /var/tmp || true
+          chmod -R 1777 /var/tmp
+          flatpak config --system --set languages "*"
+          flatpak remote-add --system flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --system -y ${FLATPAK_REFS_DIR_LIST}
+          ostree refs --repo=\${FLATPAK_SYSTEM_DIR}/repo | grep '^deploy/' | grep -v 'org\.freedesktop\.Platform\.openh264' | sed 's/^deploy\///g' > /output/flatpaks_with_deps
+          EOF
+
+          docker run --rm --privileged \
+            --entrypoint bash \
+            -e FLATPAK_SYSTEM_DIR=/flatpak/flatpak \
+            -e FLATPAK_TRIGGERSDIR=/flatpak/triggers \
+            -v "${FLATPAK_REFS_DIR}:/output" \
+            -v "${TEMP_FLATPAK_INSTALL_DIR}:/temp_flatpak_install_dir" \
+            "${image}" /temp_flatpak_install_dir/script.sh
+
+      - name: Build derived G1 image
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker build \
+            --pull \
+            --build-arg BASE_TAG="${{ inputs.base_tag }}" \
+            -t "${{ steps.meta.outputs.image_ref }}" \
+            g1-image
+
+      - name: Push derived image to ttl.sh
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker push "${{ steps.meta.outputs.image_ref }}"
+          docker rmi "${{ steps.meta.outputs.image_ref }}" || true
+          sleep 15
+
+      - name: Setup Bazzite Repo
+        shell: bash
+        run: |
+          curl -Lo "${{ github.workspace }}/bazzite.repo" \
+            "https://copr.fedorainfracloud.org/coprs/ublue-os/bazzite/repo/fedora-44/bazzite-org-bazzite-fedora-44.repo"
+
+      - name: Build ISO
+        id: build
+        uses: jasonn3/build-container-installer@c9ef3de33236e66781ec37bd0485e8009eaefe24
+        with:
+          arch: "x86_64"
+          image_name: "${{ steps.meta.outputs.image_name }}"
+          image_repo: "${{ steps.meta.outputs.image_repo }}"
+          image_tag: "${{ steps.meta.outputs.image_tag }}"
+          variant: "Kinoite"
+          version: "44"
+          iso_name: "bazzite-deck-g1-${{ inputs.base_tag }}-amd64.iso"
+          secure_boot_key_url: "${{ github.server_url }}/${{ github.repository }}/raw/${{ github.ref_name }}/secure_boot.der"
+          enrollment_password: "universalblue"
+          enable_cache_dnf: "false"
+          enable_cache_skopeo: "false"
+          flatpak_remote_refs_dir: "installer/kde_flatpaks"
+          enable_flatpak_dependencies: "false"
+          extra_boot_params: "inst.resolution=1280x800"
+          additional_templates: "/github/workspace/installer/lorax_templates/remove_root_password_prompt.tmpl /github/workspace/installer/lorax_templates/set_default_user.tmpl"
+          repos: "/github/workspace/bazzite.repo /etc/yum.repos.d/fedora.repo /etc/yum.repos.d/fedora-updates.repo"
+
+      - name: Upload ISO Artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: "bazzite-deck-g1-${{ inputs.base_tag }}-iso"
+          path: |
+            ${{ steps.build.outputs.iso_path }}/${{ steps.build.outputs.iso_name }}
+            ${{ steps.build.outputs.iso_path }}/${{ steps.build.outputs.iso_name }}-CHECKSUM
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
