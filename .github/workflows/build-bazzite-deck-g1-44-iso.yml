@@ -1,4 +1,4 @@
-name: Build Bazzite Deck G1 ISO (Fedora 44, rechunked)
+name: Build Bazzite Deck G1 ISO (Fedora 44.20260820, rechunked)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
       base_tag:
         description: "Base bazzite-deck image tag"
         required: true
-        default: "stable-44"
+        default: "44.20260820"
 
 permissions:
   contents: read
@@ -230,7 +230,7 @@ jobs:
           EOF
 
           cat > g1-image/Containerfile <<'EOF'
-          ARG BASE_TAG=stable-44
+          ARG BASE_TAG=44.20260820
           FROM ghcr.io/ublue-os/bazzite-deck:${BASE_TAG}
 
           COPY 61-sensor-local.hwdb /usr/lib/udev/hwdb.d/61-sensor-local.hwdb
@@ -339,6 +339,16 @@ jobs:
           sudo skopeo copy \
             containers-storage:localhost/chunked-g1-img \
             "docker://${{ steps.meta.outputs.image_ref }}"
+
+      - name: Verify pushed image
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo skopeo inspect "docker://${{ steps.meta.outputs.image_ref }}" > pushed-image.json
+          jq -r '.Name, .Digest, (.Layers | length)' pushed-image.json
+          sudo podman pull "${{ steps.meta.outputs.image_ref }}"
+          sudo podman image inspect "${{ steps.meta.outputs.image_ref }}" > pulled-image.json
+          jq -r '.[0].RepoTags[0]' pulled-image.json
 
       - name: Setup Bazzite Repo
         shell: bash
