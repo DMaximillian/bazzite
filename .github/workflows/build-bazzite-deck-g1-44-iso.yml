@@ -280,12 +280,14 @@ jobs:
             -v "${TEMP_FLATPAK_INSTALL_DIR}:/temp_flatpak_install_dir" \
             "${image}" /temp_flatpak_install_dir/script.sh
 
-      - name: Build derived G1 image
+      - name: Build derived G1 image with buildah
         shell: bash
         run: |
           set -euxo pipefail
-          docker build \
+          sudo buildah bud \
             --pull \
+            --layers=false \
+            --squash \
             --build-arg BASE_TAG="${{ inputs.base_tag }}" \
             -t "${{ steps.meta.outputs.image_ref }}" \
             g1-image
@@ -294,8 +296,9 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          docker push "${{ steps.meta.outputs.image_ref }}"
-          docker rmi "${{ steps.meta.outputs.image_ref }}" || true
+          sudo buildah push \
+            "${{ steps.meta.outputs.image_ref }}" \
+            "docker://${{ steps.meta.outputs.image_ref }}"
           sleep 15
 
       - name: Setup Bazzite Repo
