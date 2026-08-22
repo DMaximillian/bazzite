@@ -298,13 +298,17 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          sudo buildah unshare bash -euo pipefail -c '
-            container=$(buildah from localhost/derived-g1-img)
-            mnt=$(buildah mount "$container")
-            rm -rf "$mnt"/run/.* "$mnt"/run/* "$mnt"/tmp/.* "$mnt"/tmp/* || true
-            buildah umount "$container"
-            buildah commit --identity-label=false --rm "$container" localhost/derived-g1-img
-          '
+
+          sudo mkdir -p /root/.config/containers
+
+          sudo env HOME=/root XDG_CONFIG_HOME=/root/.config \
+            buildah unshare bash -euo pipefail -c '
+              container=$(buildah from localhost/derived-g1-img)
+              mnt=$(buildah mount "$container")
+              rm -rf "$mnt"/run/.* "$mnt"/run/* "$mnt"/tmp/.* "$mnt"/tmp/* || true
+              buildah umount "$container"
+              buildah commit --identity-label=false --rm "$container" localhost/derived-g1-img
+            '
 
           RECHUNK_DIR="$(mktemp -d)"
           echo "RECHUNK_DIR=${RECHUNK_DIR}" >> "$GITHUB_ENV"
