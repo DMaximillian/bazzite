@@ -58,27 +58,27 @@ jobs:
         id: build
         uses: jasonn3/build-container-installer@c9ef3de33236e66781ec37bd0485e8009eaefe24
         with:
-          arch: x86_64
-          image_name: bazzite-deck
-          image_repo: ghcr.io/ublue-os
-          image_tag: 43.20260420
-          variant: Kinoite
-          version: 43
-          iso_name: bazzite-deck-43.20260420-amd64.iso
-          secure_boot_key_url: '${{ github.server_url }}/${{ github.repository }}/raw/${{ github.ref_name }}/secure_boot.der'
-          enrollment_password: 'universalblue'
+          arch: "x86_64"
+          image_name: "bazzite-deck"
+          image_repo: "ghcr.io/ublue-os"
+          image_tag: "43.20260420"
+          variant: "Kinoite"
+          version: "43"
+          iso_name: "bazzite-deck-43.20260420-amd64.iso"
+          secure_boot_key_url: "${{ github.server_url }}/${{ github.repository }}/raw/${{ github.ref_name }}/secure_boot.der"
+          enrollment_password: "universalblue"
           enable_cache_dnf: "false"
           enable_cache_skopeo: "false"
-          flatpak_remote_refs_dir: installer/kde_flatpaks
+          flatpak_remote_refs_dir: "installer/kde_flatpaks"
           enable_flatpak_dependencies: "false"
-          extra_boot_params: inst.resolution=1280x800
-          additional_templates: '/github/workspace/installer/lorax_templates/remove_root_password_prompt.tmpl /github/workspace/installer/lorax_templates/set_default_user.tmpl'
-          repos: '/github/workspace/bazzite.repo /etc/yum.repos.d/fedora.repo /etc/yum.repos.d/fedora-updates.repo'
+          extra_boot_params: "inst.resolution=1280x800"
+          additional_templates: "/github/workspace/installer/lorax_templates/remove_root_password_prompt.tmpl /github/workspace/installer/lorax_templates/set_default_user.tmpl"
+          repos: "/github/workspace/bazzite.repo /etc/yum.repos.d/fedora.repo /etc/yum.repos.d/fedora-updates.repo"
 
       - name: Upload ISO Artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: bazzite-deck-43.20260420-iso
+          name: "bazzite-deck-43.20260420-iso"
           path: |
             ${{ steps.build.outputs.iso_path }}/${{ steps.build.outputs.iso_name }}
             ${{ steps.build.outputs.iso_path }}/${{ steps.build.outputs.iso_name }}-CHECKSUM
