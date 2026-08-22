@@ -1,0 +1,287 @@
+name: Build Bazzite Deck G1 Diagnostic ISO (Fedora 44)
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_tag:
+        description: "Base bazzite-deck image tag"
+        required: true
+        default: "stable-44"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  build-diag-iso:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+
+      - name: Checkout Repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          submodules: recursive
+
+      - name: Check if /mnt is there
+        id: check_mnt
+        shell: bash
+        run: |
+          if sudo mountpoint /mnt; then
+            echo "mnt_is_there=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "mnt_is_there=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Mount BTRFS for podman storage
+        if: ${{ steps.check_mnt.outputs.mnt_is_there == '1' }}
+        uses: ublue-os/container-storage-action@main
+        with:
+          target-dir: /var/lib/containers
+
+      - name: Prepare image metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE_NAME="bazzite-deck-g1-diag-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          IMAGE_REPO="ttl.sh"
+          IMAGE_TAG="24h"
+          IMAGE_REF="${IMAGE_REPO}/${IMAGE_NAME}:${IMAGE_TAG}"
+
+          echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "image_repo=${IMAGE_REPO}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "image_ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
+
+      - name: Create diagnostic overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p diag-image
+
+          cat > diag-image/oxp-g1-bootdiag.sh <<'EOF'
+          #!/usr/bin/bash
+          set -euo pipefail
+
+          TS="$(date +%Y%m%d-%H%M%S)"
+          OUT="/var/log/oxp-g1-diag/boot-${TS}"
+          mkdir -p "${OUT}"
+
+          uname -a > "${OUT}/uname.txt" 2>&1 || true
+          cat /etc/os-release > "${OUT}/os-release.txt" 2>&1 || true
+          rpm-ostree status > "${OUT}/rpm-ostree-status.txt" 2>&1 || true
+          systemctl --no-pager --full status inputplumber > "${OUT}/inputplumber-status.txt" 2>&1 || true
+          systemctl --no-pager --full status hhd > "${OUT}/hhd-status.txt" 2>&1 || true
+          systemctl --no-pager --full status systemd-udevd > "${OUT}/udevd-status.txt" 2>&1 || true
+          journalctl -b --no-pager > "${OUT}/journalctl-boot.txt" 2>&1 || true
+          dmesg > "${OUT}/dmesg.txt" 2>&1 || true
+          lsusb > "${OUT}/lsusb.txt" 2>&1 || true
+          lsusb -t > "${OUT}/lsusb-tree.txt" 2>&1 || true
+          libinput list-devices > "${OUT}/libinput-list-devices.txt" 2>&1 || true
+          loginctl seat-status seat0 > "${OUT}/seat0.txt" 2>&1 || true
+          find /dev/input -maxdepth 2 \( -type l -o -type c \) > "${OUT}/dev-input.txt" 2>&1 || true
+          ls -la /dev/hidraw* > "${OUT}/hidraw-list.txt" 2>&1 || true
+          ls -la /dev/ttyUSB* /dev/ttyACM* > "${OUT}/tty-list.txt" 2>&1 || true
+
+          for path in /sys/class/hidraw/hidraw*; do
+            [ -e "$path" ] || continue
+            name="$(basename "$path")"
+            cat "$path/device/uevent" > "${OUT}/${name}-uevent.txt" 2>&1 || true
+          done
+
+          for dev in /dev/input/event* /dev/input/js*; do
+            [ -e "$dev" ] || continue
+            base="$(basename "$dev")"
+            udevadm info --query=all --name="$dev" > "${OUT}/${base}-udev.txt" 2>&1 || true
+          done
+
+          for dev in /dev/ttyUSB* /dev/ttyACM*; do
+            [ -e "$dev" ] || continue
+            base="$(basename "$dev")"
+            udevadm info --query=all --name="$dev" > "${OUT}/${base}-udev.txt" 2>&1 || true
+          done
+          EOF
+
+          cat > diag-image/oxp-g1-capture-buttons.sh <<'EOF'
+          #!/usr/bin/bash
+          set -euo pipefail
+
+          DURATION="${1:-30}"
+          TS="$(date +%Y%m%d-%H%M%S)"
+          OUT="/var/tmp/oxp-g1-capture-${TS}"
+          mkdir -p "${OUT}"
+
+          echo "Capture dir: ${OUT}"
+          echo "Press Home/Turbo/Mouse and any special buttons for ${DURATION} seconds."
+
+          uname -a > "${OUT}/uname.txt" 2>&1 || true
+          rpm-ostree status > "${OUT}/rpm-ostree-status.txt" 2>&1 || true
+          systemctl --no-pager --full status inputplumber > "${OUT}/inputplumber-status.txt" 2>&1 || true
+          systemctl --no-pager --full status hhd > "${OUT}/hhd-status.txt" 2>&1 || true
+          journalctl -b --no-pager > "${OUT}/journalctl-boot.txt" 2>&1 || true
+          dmesg > "${OUT}/dmesg-before.txt" 2>&1 || true
+          lsusb > "${OUT}/lsusb.txt" 2>&1 || true
+          lsusb -t > "${OUT}/lsusb-tree.txt" 2>&1 || true
+          libinput list-devices > "${OUT}/libinput-list-devices.txt" 2>&1 || true
+
+          for dev in /dev/input/event* /dev/input/js* /dev/hidraw* /dev/ttyUSB* /dev/ttyACM*; do
+            [ -e "$dev" ] || continue
+            base="$(basename "$dev")"
+            udevadm info --query=all --name="$dev" > "${OUT}/${base}-udev.txt" 2>&1 || true
+          done
+
+          if command -v libinput >/dev/null 2>&1; then
+            timeout "${DURATION}"s libinput debug-events --show-keycodes > "${OUT}/libinput-debug-events.txt" 2>&1 || true &
+          fi
+
+          timeout "${DURATION}"s journalctl -kf > "${OUT}/journal-follow.txt" 2>&1 || true &
+
+          for dev in /dev/ttyUSB* /dev/ttyACM*; do
+            [ -e "$dev" ] || continue
+            base="$(basename "$dev")"
+            (
+              stty -F "$dev" 115200 cs8 parenb -parodd cstopb -ixon -ixoff -icanon -echo -echoe -echok -echoctl -echoke -opost || true
+              timeout "${DURATION}"s dd if="$dev" bs=64 status=none | xxd -p -c 64 > "${OUT}/${base}-raw-hex.txt" 2>&1 || true
+            ) &
+          done
+
+          wait || true
+          dmesg > "${OUT}/dmesg-after.txt" 2>&1 || true
+          tar -C /var/tmp -czf "${OUT}.tar.gz" "$(basename "${OUT}")"
+          echo "Bundle: ${OUT}.tar.gz"
+          EOF
+
+          cat > diag-image/oxp-g1-bootdiag.service <<'EOF'
+          [Unit]
+          Description=OneXPlayer G1 boot diagnostics collector
+          After=multi-user.target
+          Wants=multi-user.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/oxp-g1-bootdiag.sh
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          cat > diag-image/README-OXP-G1-DIAG.txt <<'EOF'
+          OneXPlayer G1 diagnostics
+
+          Auto logs:
+            /var/log/oxp-g1-diag/
+
+          Manual special-button capture:
+            sudo /usr/local/bin/oxp-g1-capture-buttons.sh 30
+
+          After running it, send:
+            /var/tmp/oxp-g1-capture-*.tar.gz
+          EOF
+
+          cat > diag-image/Containerfile <<'EOF'
+          ARG BASE_TAG=stable-44
+          FROM ghcr.io/ublue-os/bazzite-deck:${BASE_TAG}
+
+          COPY oxp-g1-bootdiag.sh /usr/local/bin/oxp-g1-bootdiag.sh
+          COPY oxp-g1-capture-buttons.sh /usr/local/bin/oxp-g1-capture-buttons.sh
+          COPY oxp-g1-bootdiag.service /usr/lib/systemd/system/oxp-g1-bootdiag.service
+          COPY README-OXP-G1-DIAG.txt /usr/share/doc/oxp-g1-diag/README.txt
+
+          RUN chmod 0755 \
+                /usr/local/bin/oxp-g1-bootdiag.sh \
+                /usr/local/bin/oxp-g1-capture-buttons.sh \
+           && mkdir -p /usr/lib/systemd/system/multi-user.target.wants /usr/share/doc/oxp-g1-diag \
+           && ln -sf ../oxp-g1-bootdiag.service /usr/lib/systemd/system/multi-user.target.wants/oxp-g1-bootdiag.service
+          EOF
+
+      - name: Determine Flatpak Dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          image="ghcr.io/ublue-os/bazzite-deck:${{ inputs.base_tag }}"
+          TEMP_FLATPAK_INSTALL_DIR=$(mktemp -d -p "${{ github.workspace }}" flatpak.XXX)
+          FLATPAK_REFS_DIR="${{ github.workspace }}/installer/kde_flatpaks"
+          FLATPAK_REFS_DIR_LIST=$(cat "${FLATPAK_REFS_DIR}"/* | tr '\n' ' ')
+
+          cat > "${TEMP_FLATPAK_INSTALL_DIR}/script.sh" <<EOF
+          mkdir -p /flatpak/flatpak /flatpak/triggers
+          mkdir /var/tmp || true
+          chmod -R 1777 /var/tmp
+          flatpak config --system --set languages "*"
+          flatpak remote-add --system flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --system -y ${FLATPAK_REFS_DIR_LIST}
+          ostree refs --repo=\${FLATPAK_SYSTEM_DIR}/repo | grep '^deploy/' | grep -v 'org\.freedesktop\.Platform\.openh264' | sed 's/^deploy\///g' > /output/flatpaks_with_deps
+          EOF
+
+          sudo podman run --rm --privileged \
+            --entrypoint bash \
+            -e FLATPAK_SYSTEM_DIR=/flatpak/flatpak \
+            -e FLATPAK_TRIGGERSDIR=/flatpak/triggers \
+            -v "${FLATPAK_REFS_DIR}:/output" \
+            -v "${TEMP_FLATPAK_INSTALL_DIR}:/temp_flatpak_install_dir" \
+            "${image}" /temp_flatpak_install_dir/script.sh
+
+      - name: Build derived diagnostic image
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo buildah bud \
+            --pull \
+            --layers=false \
+            --squash \
+            --build-arg BASE_TAG="${{ inputs.base_tag }}" \
+            -t "${{ steps.meta.outputs.image_ref }}" \
+            diag-image
+
+      - name: Push derived image to ttl.sh
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo buildah push \
+            "${{ steps.meta.outputs.image_ref }}" \
+            "docker://${{ steps.meta.outputs.image_ref }}"
+          sleep 15
+
+      - name: Setup Bazzite Repo
+        shell: bash
+        run: |
+          curl -Lo "${{ github.workspace }}/bazzite.repo" \
+            "https://copr.fedorainfracloud.org/coprs/ublue-os/bazzite/repo/fedora-44/bazzite-org-bazzite-fedora-44.repo"
+
+      - name: Build ISO
+        id: build
+        uses: jasonn3/build-container-installer@c9ef3de33236e66781ec37bd0485e8009eaefe24
+        with:
+          arch: "x86_64"
+          image_name: "${{ steps.meta.outputs.image_name }}"
+          image_repo: "${{ steps.meta.outputs.image_repo }}"
+          image_tag: "${{ steps.meta.outputs.image_tag }}"
+          variant: "Kinoite"
+          version: "44"
+          iso_name: "bazzite-deck-g1-diag-${{ inputs.base_tag }}-amd64.iso"
+          secure_boot_key_url: "${{ github.server_url }}/${{ github.repository }}/raw/${{ github.ref_name }}/secure_boot.der"
+          enrollment_password: "universalblue"
+          enable_cache_dnf: "false"
+          enable_cache_skopeo: "false"
+          flatpak_remote_refs_dir: "installer/kde_flatpaks"
+          enable_flatpak_dependencies: "false"
+          extra_boot_params: "inst.resolution=1280x800"
+          additional_templates: "/github/workspace/installer/lorax_templates/remove_root_password_prompt.tmpl /github/workspace/installer/lorax_templates/set_default_user.tmpl"
+          repos: "/github/workspace/bazzite.repo /etc/yum.repos.d/fedora.repo /etc/yum.repos.d/fedora-updates.repo"
+
+      - name: Upload ISO Artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: "bazzite-deck-g1-diag-${{ inputs.base_tag }}-iso"
+          path: |
+            ${{ steps.build.outputs.iso_path }}/${{ steps.build.outputs.iso_name }}
+            ${{ steps.build.outputs.iso_path }}/${{ steps.build.outputs.iso_name }}-CHECKSUM
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
