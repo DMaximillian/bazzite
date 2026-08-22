@@ -28,6 +28,22 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Check if /mnt is there
+        id: check_mnt
+        shell: bash
+        run: |
+          if sudo mountpoint /mnt; then
+            echo "mnt_is_there=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "mnt_is_there=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Mount BTRFS for podman storage
+        if: ${{ steps.check_mnt.outputs.mnt_is_there == '1' }}
+        uses: ublue-os/container-storage-action@main
+        with:
+          target-dir: /var/lib/containers
+
       - name: Prepare derived image metadata
         id: meta
         shell: bash
@@ -272,7 +288,7 @@ jobs:
           ostree refs --repo=\${FLATPAK_SYSTEM_DIR}/repo | grep '^deploy/' | grep -v 'org\.freedesktop\.Platform\.openh264' | sed 's/^deploy\///g' > /output/flatpaks_with_deps
           EOF
 
-          docker run --rm --privileged \
+          sudo podman run --rm --privileged \
             --entrypoint bash \
             -e FLATPAK_SYSTEM_DIR=/flatpak/flatpak \
             -e FLATPAK_TRIGGERSDIR=/flatpak/triggers \
@@ -287,7 +303,7 @@ jobs:
           sudo buildah bud \
             --pull \
             --layers=false \
-            --squash \
+            --squash-all \
             --build-arg BASE_TAG="${{ inputs.base_tag }}" \
             -t "${{ steps.meta.outputs.image_ref }}" \
             g1-image
