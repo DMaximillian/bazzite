@@ -1,4 +1,4 @@
-name: Build Bazzite Deck G1 ISO (Fedora 44.20260820, rechunked)
+name: Build Bazzite Deck G1 ISO (Fedora 44.20260820, rechunked, verified)
 
 on:
   workflow_dispatch:
@@ -55,11 +55,14 @@ jobs:
           IMAGE_REPO="ghcr.io/${OWNER_LC}"
           IMAGE_TAG="run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           IMAGE_REF="${IMAGE_REPO}/${IMAGE_NAME}:${IMAGE_TAG}"
+          CREATED_AT="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 
+          echo "owner_lc=${OWNER_LC}" >> "$GITHUB_OUTPUT"
           echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
           echo "image_repo=${IMAGE_REPO}" >> "$GITHUB_OUTPUT"
           echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
           echo "image_ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
+          echo "created_at=${CREATED_AT}" >> "$GITHUB_OUTPUT"
 
       - name: Create G1 overlay
         shell: bash
@@ -294,21 +297,28 @@ jobs:
             -t localhost/derived-g1-img \
             g1-image
 
+      - name: Apply boot and OCI labels
+        shell: bash
+        run: |
+          set -euxo pipefail
+          CID=$(sudo buildah from localhost/derived-g1-img)
+          sudo buildah config \
+            --label "org.opencontainers.image.title=Bazzite Deck G1" \
+            --label "org.opencontainers.image.description=Bazzite Deck with OneXPlayer G1 fixes" \
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --label "org.opencontainers.image.url=https://github.com/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.created=${{ steps.meta.outputs.created_at }}" \
+            --label "org.opencontainers.image.version=${{ inputs.base_tag }}-g1-${{ github.run_id }}" \
+            --label "org.opencontainers.image.vendor=${{ github.repository_owner }}" \
+            --label "ostree.bootable=true" \
+            "${CID}"
+          sudo buildah commit --identity-label=false --rm "${CID}" localhost/derived-g1-img
+
       - name: Rechunk derived image
         shell: bash
         run: |
           set -euxo pipefail
-
-          sudo mkdir -p /root/.config/containers
-
-          sudo env HOME=/root XDG_CONFIG_HOME=/root/.config \
-            buildah unshare bash -euo pipefail -c '
-              container=$(buildah from localhost/derived-g1-img)
-              mnt=$(buildah mount "$container")
-              rm -rf "$mnt"/run/.* "$mnt"/run/* "$mnt"/tmp/.* "$mnt"/tmp/* || true
-              buildah umount "$container"
-              buildah commit --identity-label=false --rm "$container" localhost/derived-g1-img
-            '
 
           RECHUNK_DIR="$(mktemp -d)"
           echo "RECHUNK_DIR=${RECHUNK_DIR}" >> "$GITHUB_ENV"
@@ -322,6 +332,13 @@ jobs:
             localhost/derived-g1-img \
             compose build-chunked-oci \
             --bootc --max-layers 127 --format-version 2 \
+            --label "org.opencontainers.image.title=Bazzite Deck G1" \
+            --label "org.opencontainers.image.description=Bazzite Deck with OneXPlayer G1 fixes" \
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.created=${{ steps.meta.outputs.created_at }}" \
+            --label "org.opencontainers.image.version=${{ inputs.base_tag }}-g1-${{ github.run_id }}" \
+            --label "ostree.bootable=true" \
             --rootfs /rpm-ostree \
             --output oci-archive:/run/out/chunked.oci
 
@@ -344,15 +361,34 @@ jobs:
             containers-storage:localhost/chunked-g1-img \
             "docker://${{ steps.meta.outputs.image_ref }}"
 
-      - name: Verify pushed image
+      - name: Verify pushed image with auth
         shell: bash
         run: |
           set -euxo pipefail
           sudo skopeo inspect "docker://${{ steps.meta.outputs.image_ref }}" > pushed-image.json
-          jq -r '.Name, .Digest, (.Layers | length)' pushed-image.json
+          jq -r '.Name, .Digest, (.Layers | length), .Labels["ostree.bootable"]' pushed-image.json
           sudo podman pull "${{ steps.meta.outputs.image_ref }}"
           sudo podman image inspect "${{ steps.meta.outputs.image_ref }}" > pulled-image.json
           jq -r '.[0].RepoTags[0]' pulled-image.json
+
+      - name: Verify pushed image without auth
+        shell: bash
+        run: |
+          set -euxo pipefail
+          AUTH_FILE="$(mktemp)"
+          printf '{"auths":{}}' > "${AUTH_FILE}"
+          if ! sudo skopeo inspect --authfile "${AUTH_FILE}" "docker://${{ steps.meta.outputs.image_ref }}" > public-image.json; then
+            echo "Image is not anonymously readable from GHCR."
+            echo "Make package public once in GitHub UI:"
+            echo "https://github.com/users/${{ steps.meta.outputs.owner_lc }}/packages/container/${{ steps.meta.outputs.image_name }}"
+            exit 1
+          fi
+          jq -r '.Name, .Digest' public-image.json
+
+      - name: Wait for GHCR propagation
+        shell: bash
+        run: |
+          sleep 20
 
       - name: Setup Bazzite Repo
         shell: bash
