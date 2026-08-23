@@ -1,0 +1,378 @@
+name: New Build Bazzite Deck G1 ISO (44.20260820, new installer)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}-g1-new-installer
+  cancel-in-progress: true
+
+jobs:
+  build-g1-iso:
+    runs-on: ubuntu-latest
+
+    env:
+      BASE_TAG: "44.20260820"
+      ISO_NAME: "bazzite-deck-g1-44.20260820-live-amd64.iso"
+
+    steps:
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+        with:
+          tool-cache: true
+
+      - name: Mount Container Storage BTRFS Loopback
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo truncate -s 110G /mnt/podman-storage.img
+          sudo mkfs.btrfs -f -m single -d single /mnt/podman-storage.img
+          sudo podman system reset --force
+          sudo systemctl stop podman.service || true
+          LOOP=$(sudo losetup --find --show --direct-io=on /mnt/podman-storage.img)
+          sudo mkdir -p /mnt/podman-storage
+          sudo mount -o compress-force=zstd:2,discard=async,noatime "$LOOP" /mnt/podman-storage
+          sudo mkdir -p /mnt/podman-storage/storage /mnt/podman-storage/tmp
+          sudo mount --bind /mnt/podman-storage/storage /var/lib/containers/storage
+          sudo systemctl start podman.service || true
+          sudo df -h
+          sudo du -sh /mnt/podman-storage.img
+
+      - name: Checkout Repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          submodules: recursive
+
+      - name: Create G1 overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p g1-image
+
+          cat > g1-image/61-sensor-local.hwdb <<'EOF'
+          # OneXPlayer G1 A — bmi260 accelerometer is mounted 180° vs the panel.
+          sensor:modalias:acpi:BMI0160*:dmi:*:svnONE-NETBOOK:pnONEXPLAYERG1A:*
+           ACCEL_MOUNT_MATRIX=-1, 0, 0; 0, -1, 0; 0, 0, 1
+          EOF
+
+          cat > g1-image/62-amira-kbd-fkeys.hwdb <<'EOF'
+          # AMIRA keyboard mode-toggle emits spurious F13/F14/F17.
+          evdev:input:b0003v6080p8060*
+           KEYBOARD_KEY_70068=reserved
+           KEYBOARD_KEY_70069=reserved
+           KEYBOARD_KEY_7006c=reserved
+          EOF
+
+          cat > g1-image/71-controller-access.rules <<'EOF'
+          # Ensure handheld gamepad nodes are readable by the logged-in user.
+          SUBSYSTEM=="input", ENV{ID_INPUT_JOYSTICK}=="1", TAG+="uaccess", MODE="0660", GROUP="input"
+          KERNEL=="js[0-9]*", SUBSYSTEM=="input", TAG+="uaccess", MODE="0660", GROUP="input"
+          EOF
+
+          cat > g1-image/99-usb-autosuspend.rules <<'EOF'
+          ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="05e3", ATTR{idProduct}=="0610", ATTR{power/control}="on", ATTR{power/autosuspend_delay_ms}="0"
+          ACTION=="add", SUBSYSTEM=="usb", ATTR{bDeviceClass}=="09", ATTR{power/control}="on"
+          ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="6080", ATTR{idProduct}=="8060", ATTR{power/control}="on", ATTR{power/autosuspend_delay_ms}="0"
+          EOF
+
+          cat > g1-image/usb-hub-poweron.sh <<'EOF'
+          #!/usr/bin/bash
+          set -euo pipefail
+          udevadm settle --timeout=60 || true
+          for d in /sys/bus/usb/devices/*/power/control; do
+              echo on > "$d" 2>/dev/null || true
+          done
+          EOF
+
+          cat > g1-image/usb-hub-poweron.service <<'EOF'
+          [Unit]
+          Description=Wait for USB devices then force hubs to stay powered
+          Before=gdm.service display-manager.service
+          After=systemd-udevd.service
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/usr/local/bin/usb-hub-poweron.sh
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          cat > g1-image/oxp-rgb.py <<'EOF'
+          #!/usr/bin/env python3
+          import configparser
+          import glob
+          import os
+          import sys
+          import time
+
+          CONF = "/etc/oxp-rgb.conf"
+          VID, PID = "1A2C", "B001"
+          EFFECTS = {
+              "aurora": 0x01, "flowing": 0x03, "neon": 0x05, "dreamy": 0x07,
+              "sun": 0x08, "cyberpunk": 0x09, "sunset": 0x0B,
+              "colorful": 0x0C, "monster_woke": 0x0D,
+          }
+          BRIGHT = {"low": 0x01, "medium": 0x03, "high": 0x04}
+
+          def gen_cmd(cid, cmd, idx=0x01, size=64):
+              base = bytes([cid, 0x3F, idx]) + bytes(cmd)
+              return base + bytes([0] * (size - len(base) - 2)) + bytes([0x3F, cid])
+
+          def gen_brightness(side, enabled, bc):
+              return gen_cmd(0xB8, [0xFD, side, 0x02, 1 if enabled else 0, 0x05, bc])
+
+          def gen_rgb_solid(r, g, b, side=0):
+              return gen_cmd(0xB8, [0xFE, side, 0x02] + 18 * [r, g, b] + [r, g])
+
+          def gen_rgb_mode(mc):
+              return gen_cmd(0xB8, [mc, 0x00, 0x02])
+
+          def find_dev():
+              for hr in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+                  try:
+                      uevent = open(os.path.join(hr, "device/uevent")).read().upper()
+                  except OSError:
+                      continue
+                  if VID in uevent and PID in uevent:
+                      return "/dev/" + os.path.basename(hr)
+              return None
+
+          def main():
+              config = configparser.ConfigParser()
+              config.read(CONF)
+              rgb = config["rgb"] if config.has_section("rgb") else {}
+              mode = rgb.get("mode", "effect")
+              bc = BRIGHT.get(rgb.get("brightness", "high"), 0x04)
+
+              dev = find_dev()
+              if not dev:
+                  print("OXP RGB device not found", file=sys.stderr)
+                  sys.exit(1)
+
+              fd = os.open(dev, os.O_RDWR)
+
+              def write_cmd(cmd):
+                  os.write(fd, bytes(cmd))
+                  time.sleep(0.08)
+
+              write_cmd(gen_brightness(0, True, bc))
+              if mode == "solid":
+                  r = int(rgb.get("r", 0))
+                  g = int(rgb.get("g", 255))
+                  b = int(rgb.get("b", 0))
+                  for side in (0x00, 0x01, 0x02):
+                      write_cmd(gen_rgb_solid(r, g, b, side=side))
+              else:
+                  effect = rgb.get("effect", "aurora")
+                  write_cmd(gen_rgb_mode(EFFECTS.get(effect, 0x01)))
+
+              os.close(fd)
+
+          if __name__ == "__main__":
+              main()
+          EOF
+
+          cat > g1-image/oxp-rgb.conf <<'EOF'
+          [rgb]
+          mode = effect
+          effect = aurora
+          brightness = high
+          r = 0
+          g = 255
+          b = 0
+          EOF
+
+          cat > g1-image/oxp-rgb-apply.sh <<'EOF'
+          #!/usr/bin/bash
+          set -euo pipefail
+          for _ in $(seq 1 30); do
+              if /usr/local/bin/oxp-rgb.py; then
+                  exit 0
+              fi
+              sleep 2
+          done
+          exit 0
+          EOF
+
+          cat > g1-image/oxp-rgb.service <<'EOF'
+          [Unit]
+          Description=OneXPlayer G1 controller RGB workaround
+          After=graphical.target
+          Wants=graphical.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/oxp-rgb-apply.sh
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          cat > g1-image/Containerfile <<'EOF'
+          ARG BASE_TAG=44.20260820
+          FROM ghcr.io/ublue-os/bazzite-deck:${BASE_TAG}
+
+          COPY 61-sensor-local.hwdb /usr/lib/udev/hwdb.d/61-sensor-local.hwdb
+          COPY 62-amira-kbd-fkeys.hwdb /usr/lib/udev/hwdb.d/62-amira-kbd-fkeys.hwdb
+          COPY 71-controller-access.rules /usr/lib/udev/rules.d/71-controller-access.rules
+          COPY 99-usb-autosuspend.rules /usr/lib/udev/rules.d/99-usb-autosuspend.rules
+
+          COPY usb-hub-poweron.sh /usr/local/bin/usb-hub-poweron.sh
+          COPY usb-hub-poweron.service /usr/lib/systemd/system/usb-hub-poweron.service
+
+          COPY oxp-rgb.py /usr/local/bin/oxp-rgb.py
+          COPY oxp-rgb-apply.sh /usr/local/bin/oxp-rgb-apply.sh
+          COPY oxp-rgb.service /usr/lib/systemd/system/oxp-rgb.service
+          COPY oxp-rgb.conf /usr/etc/oxp-rgb.conf
+
+          RUN chmod 0755 \
+                /usr/local/bin/usb-hub-poweron.sh \
+                /usr/local/bin/oxp-rgb.py \
+                /usr/local/bin/oxp-rgb-apply.sh \
+           && mkdir -p /usr/lib/systemd/system/multi-user.target.wants /usr/etc \
+           && ln -sf ../usb-hub-poweron.service /usr/lib/systemd/system/multi-user.target.wants/usb-hub-poweron.service \
+           && ln -sf ../oxp-rgb.service /usr/lib/systemd/system/multi-user.target.wants/oxp-rgb.service \
+           && (systemd-hwdb update || udevadm hwdb --update || true)
+
+          # Boot fix: add removable-media GRUB fallback that jumps to Fedora GRUB config.
+          RUN mkdir -p /usr/lib/ostree-boot/efi/EFI/BOOT \
+           && cat > /usr/lib/ostree-boot/efi/EFI/BOOT/grub.cfg <<'BOOTEOF'
+          search --no-floppy --file --set=root /EFI/fedora/grub.cfg
+          configfile ($root)/EFI/fedora/grub.cfg
+          BOOTEOF
+
+          # Best-effort fallback EFI binary for firmware/GRUB paths that expect BOOTX64.EFI.
+          RUN if [ -f /usr/lib/ostree-boot/efi/EFI/fedora/shimx64.efi ]; then \
+                cp -f /usr/lib/ostree-boot/efi/EFI/fedora/shimx64.efi /usr/lib/ostree-boot/efi/EFI/BOOT/BOOTX64.EFI; \
+              elif [ -f /usr/lib/ostree-boot/efi/EFI/fedora/grubx64.efi ]; then \
+                cp -f /usr/lib/ostree-boot/efi/EFI/fedora/grubx64.efi /usr/lib/ostree-boot/efi/EFI/BOOT/BOOTX64.EFI; \
+              fi
+          EOF
+
+      - name: Build derived G1 image
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo env TMPDIR=/mnt/podman-storage/tmp podman build \
+            --pull \
+            --security-opt label=disable \
+            --build-arg BASE_TAG="${BASE_TAG}" \
+            -t localhost/derived-g1-img \
+            g1-image
+
+      - name: Verify derived image contents
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo podman run --rm localhost/derived-g1-img test -f /usr/lib/ostree-boot/efi/EFI/BOOT/grub.cfg
+          sudo podman run --rm localhost/derived-g1-img test -f /usr/lib/udev/hwdb.d/61-sensor-local.hwdb
+          sudo podman run --rm localhost/derived-g1-img rpm -q kernel-core
+
+      - name: Apply OCI and boot labels
+        shell: bash
+        run: |
+          set -euxo pipefail
+          CID=$(sudo buildah from localhost/derived-g1-img)
+          sudo buildah config \
+            --label "org.opencontainers.image.title=Bazzite Deck G1" \
+            --label "org.opencontainers.image.description=Bazzite Deck with OneXPlayer G1 fixes" \
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --label "org.opencontainers.image.url=https://github.com/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.version=${BASE_TAG}-g1" \
+            --label "ostree.bootable=true" \
+            "${CID}"
+          sudo buildah commit --identity-label=false --rm "${CID}" localhost/derived-g1-img
+
+      - name: Rechunk derived image
+        shell: bash
+        run: |
+          set -euxo pipefail
+          RECHUNK_DIR="$(mktemp -d)"
+
+          sudo podman run --rm \
+            --pull=never \
+            --privileged \
+            --mount=type=image,src=localhost/derived-g1-img,target=/rpm-ostree \
+            --volume "${RECHUNK_DIR}:/run/out:Z" \
+            --entrypoint /usr/bin/rpm-ostree \
+            localhost/derived-g1-img \
+            compose build-chunked-oci \
+            --bootc --max-layers 127 --format-version 2 \
+            --label "org.opencontainers.image.title=Bazzite Deck G1" \
+            --label "org.opencontainers.image.description=Bazzite Deck with OneXPlayer G1 fixes" \
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.version=${BASE_TAG}-g1" \
+            --label "ostree.bootable=true" \
+            --rootfs /rpm-ostree \
+            --output "oci-archive:/run/out/chunked.oci"
+
+          sudo podman rmi -f localhost/derived-g1-img || true
+          CHUNKED=$(sudo podman pull "oci-archive:${RECHUNK_DIR}/chunked.oci")
+          sudo podman tag "${CHUNKED}" localhost/chunked-g1-img
+
+      - name: Verify rechunked payload
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo podman image inspect localhost/chunked-g1-img > chunked-image.json
+          jq -r '.[0].RepoTags[0]' chunked-image.json
+          sudo podman run --rm localhost/chunked-g1-img rpm -q kernel-core
+
+      - name: Build live installer payload
+        shell: bash
+        run: |
+          set -euxo pipefail
+          BASE_IMAGE="ghcr.io/ublue-os/bazzite:${BASE_TAG}"
+          INSTALL_IMAGE_PAYLOAD="localhost/chunked-g1-img"
+          FLATPAK_DIR_SHORTNAME="kde_flatpaks"
+
+          sudo env TMPDIR=/mnt/podman-storage/tmp podman build \
+            --cap-add sys_admin \
+            --security-opt label=disable \
+            --build-arg BASE_IMAGE="${BASE_IMAGE}" \
+            --build-arg INSTALL_IMAGE_PAYLOAD="${INSTALL_IMAGE_PAYLOAD}" \
+            --build-arg FLATPAK_DIR_SHORTNAME="${FLATPAK_DIR_SHORTNAME}" \
+            -t localhost/payload:latest installer/
+
+      - name: Verify live installer payload
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo podman image inspect localhost/payload:latest > payload-image.json
+          jq -r '.[0].RepoTags[0]' payload-image.json
+          sudo podman run --rm localhost/payload:latest test -f /usr/lib/bootc-image-builder/iso.yaml
+
+      - name: Build Live ISO with New Installer
+        uses: Zeglius/titanoboa@revamp-pr
+        id: build
+        with:
+          image-ref: localhost/payload:latest
+          iso-dest: ${{ env.ISO_NAME }}
+
+      - name: Verify built ISO
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -f "${{ steps.build.outputs.iso-dest }}"
+          file "${{ steps.build.outputs.iso-dest }}"
+          sha256sum "${{ steps.build.outputs.iso-dest }}" | tee "${{ steps.build.outputs.iso-dest }}-CHECKSUM"
+
+      - name: Upload ISO Artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: "bazzite-deck-g1-44.20260820-live-iso"
+          path: |
+            ${{ steps.build.outputs.iso-dest }}
+            ${{ steps.build.outputs.iso-dest }}-CHECKSUM
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: true
