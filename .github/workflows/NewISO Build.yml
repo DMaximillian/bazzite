@@ -1,4 +1,4 @@
-name: New Build Bazzite Deck G1 ISO (44.20260820, new installer)
+name: New Build Bazzite Deck G1 ISO (44.20260820, fast new installer)
 
 on:
   workflow_dispatch:
@@ -7,12 +7,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}-g1-new-installer
+  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}-g1-fast
   cancel-in-progress: true
 
 jobs:
   build-g1-iso:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
 
     env:
       BASE_TAG: "44.20260820"
@@ -46,19 +47,27 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Create G1 overlay
+      - name: Prepare G1 files
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p g1-image
 
-          cat > g1-image/61-sensor-local.hwdb <<'EOF'
+          mkdir -p g1-files
+          mkdir -p g1-image
+          mkdir -p installer/system_files/overrides/usr/lib/udev/hwdb.d
+          mkdir -p installer/system_files/overrides/usr/lib/udev/rules.d
+          mkdir -p installer/system_files/overrides/usr/local/bin
+          mkdir -p installer/system_files/overrides/usr/lib/systemd/system
+          mkdir -p installer/system_files/overrides/usr/lib/systemd/system/multi-user.target.wants
+          mkdir -p installer/system_files/overrides/usr/etc
+
+          cat > g1-files/61-sensor-local.hwdb <<'EOF'
           # OneXPlayer G1 A — bmi260 accelerometer is mounted 180° vs the panel.
           sensor:modalias:acpi:BMI0160*:dmi:*:svnONE-NETBOOK:pnONEXPLAYERG1A:*
            ACCEL_MOUNT_MATRIX=-1, 0, 0; 0, -1, 0; 0, 0, 1
           EOF
 
-          cat > g1-image/62-amira-kbd-fkeys.hwdb <<'EOF'
+          cat > g1-files/62-amira-kbd-fkeys.hwdb <<'EOF'
           # AMIRA keyboard mode-toggle emits spurious F13/F14/F17.
           evdev:input:b0003v6080p8060*
            KEYBOARD_KEY_70068=reserved
@@ -66,19 +75,19 @@ jobs:
            KEYBOARD_KEY_7006c=reserved
           EOF
 
-          cat > g1-image/71-controller-access.rules <<'EOF'
+          cat > g1-files/71-controller-access.rules <<'EOF'
           # Ensure handheld gamepad nodes are readable by the logged-in user.
           SUBSYSTEM=="input", ENV{ID_INPUT_JOYSTICK}=="1", TAG+="uaccess", MODE="0660", GROUP="input"
           KERNEL=="js[0-9]*", SUBSYSTEM=="input", TAG+="uaccess", MODE="0660", GROUP="input"
           EOF
 
-          cat > g1-image/99-usb-autosuspend.rules <<'EOF'
+          cat > g1-files/99-usb-autosuspend.rules <<'EOF'
           ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="05e3", ATTR{idProduct}=="0610", ATTR{power/control}="on", ATTR{power/autosuspend_delay_ms}="0"
           ACTION=="add", SUBSYSTEM=="usb", ATTR{bDeviceClass}=="09", ATTR{power/control}="on"
           ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="6080", ATTR{idProduct}=="8060", ATTR{power/control}="on", ATTR{power/autosuspend_delay_ms}="0"
           EOF
 
-          cat > g1-image/usb-hub-poweron.sh <<'EOF'
+          cat > g1-files/usb-hub-poweron.sh <<'EOF'
           #!/usr/bin/bash
           set -euo pipefail
           udevadm settle --timeout=60 || true
@@ -87,7 +96,7 @@ jobs:
           done
           EOF
 
-          cat > g1-image/usb-hub-poweron.service <<'EOF'
+          cat > g1-files/usb-hub-poweron.service <<'EOF'
           [Unit]
           Description=Wait for USB devices then force hubs to stay powered
           Before=gdm.service display-manager.service
@@ -102,7 +111,7 @@ jobs:
           WantedBy=multi-user.target
           EOF
 
-          cat > g1-image/oxp-rgb.py <<'EOF'
+          cat > g1-files/oxp-rgb.py <<'EOF'
           #!/usr/bin/env python3
           import configparser
           import glob
@@ -177,7 +186,7 @@ jobs:
               main()
           EOF
 
-          cat > g1-image/oxp-rgb.conf <<'EOF'
+          cat > g1-files/oxp-rgb.conf <<'EOF'
           [rgb]
           mode = effect
           effect = aurora
@@ -187,7 +196,7 @@ jobs:
           b = 0
           EOF
 
-          cat > g1-image/oxp-rgb-apply.sh <<'EOF'
+          cat > g1-files/oxp-rgb-apply.sh <<'EOF'
           #!/usr/bin/bash
           set -euo pipefail
           for _ in $(seq 1 30); do
@@ -199,7 +208,7 @@ jobs:
           exit 0
           EOF
 
-          cat > g1-image/oxp-rgb.service <<'EOF'
+          cat > g1-files/oxp-rgb.service <<'EOF'
           [Unit]
           Description=OneXPlayer G1 controller RGB workaround
           After=graphical.target
@@ -214,22 +223,36 @@ jobs:
           WantedBy=multi-user.target
           EOF
 
+          cp g1-files/61-sensor-local.hwdb installer/system_files/overrides/usr/lib/udev/hwdb.d/
+          cp g1-files/62-amira-kbd-fkeys.hwdb installer/system_files/overrides/usr/lib/udev/hwdb.d/
+          cp g1-files/71-controller-access.rules installer/system_files/overrides/usr/lib/udev/rules.d/
+          cp g1-files/99-usb-autosuspend.rules installer/system_files/overrides/usr/lib/udev/rules.d/
+          cp g1-files/usb-hub-poweron.sh installer/system_files/overrides/usr/local/bin/
+          cp g1-files/usb-hub-poweron.service installer/system_files/overrides/usr/lib/systemd/system/
+          cp g1-files/oxp-rgb.py installer/system_files/overrides/usr/local/bin/
+          cp g1-files/oxp-rgb-apply.sh installer/system_files/overrides/usr/local/bin/
+          cp g1-files/oxp-rgb.service installer/system_files/overrides/usr/lib/systemd/system/
+          cp g1-files/oxp-rgb.conf installer/system_files/overrides/usr/etc/
+
+          ln -sf ../usb-hub-poweron.service installer/system_files/overrides/usr/lib/systemd/system/multi-user.target.wants/usb-hub-poweron.service
+          ln -sf ../oxp-rgb.service installer/system_files/overrides/usr/lib/systemd/system/multi-user.target.wants/oxp-rgb.service
+
           cat > g1-image/Containerfile <<'EOF'
           ARG BASE_TAG=44.20260820
           FROM ghcr.io/ublue-os/bazzite-deck:${BASE_TAG}
 
-          COPY 61-sensor-local.hwdb /usr/lib/udev/hwdb.d/61-sensor-local.hwdb
-          COPY 62-amira-kbd-fkeys.hwdb /usr/lib/udev/hwdb.d/62-amira-kbd-fkeys.hwdb
-          COPY 71-controller-access.rules /usr/lib/udev/rules.d/71-controller-access.rules
-          COPY 99-usb-autosuspend.rules /usr/lib/udev/rules.d/99-usb-autosuspend.rules
+          COPY ../g1-files/61-sensor-local.hwdb /usr/lib/udev/hwdb.d/61-sensor-local.hwdb
+          COPY ../g1-files/62-amira-kbd-fkeys.hwdb /usr/lib/udev/hwdb.d/62-amira-kbd-fkeys.hwdb
+          COPY ../g1-files/71-controller-access.rules /usr/lib/udev/rules.d/71-controller-access.rules
+          COPY ../g1-files/99-usb-autosuspend.rules /usr/lib/udev/rules.d/99-usb-autosuspend.rules
 
-          COPY usb-hub-poweron.sh /usr/local/bin/usb-hub-poweron.sh
-          COPY usb-hub-poweron.service /usr/lib/systemd/system/usb-hub-poweron.service
+          COPY ../g1-files/usb-hub-poweron.sh /usr/local/bin/usb-hub-poweron.sh
+          COPY ../g1-files/usb-hub-poweron.service /usr/lib/systemd/system/usb-hub-poweron.service
 
-          COPY oxp-rgb.py /usr/local/bin/oxp-rgb.py
-          COPY oxp-rgb-apply.sh /usr/local/bin/oxp-rgb-apply.sh
-          COPY oxp-rgb.service /usr/lib/systemd/system/oxp-rgb.service
-          COPY oxp-rgb.conf /usr/etc/oxp-rgb.conf
+          COPY ../g1-files/oxp-rgb.py /usr/local/bin/oxp-rgb.py
+          COPY ../g1-files/oxp-rgb-apply.sh /usr/local/bin/oxp-rgb-apply.sh
+          COPY ../g1-files/oxp-rgb.service /usr/lib/systemd/system/oxp-rgb.service
+          COPY ../g1-files/oxp-rgb.conf /usr/etc/oxp-rgb.conf
 
           RUN chmod 0755 \
                 /usr/local/bin/usb-hub-poweron.sh \
@@ -237,17 +260,15 @@ jobs:
                 /usr/local/bin/oxp-rgb-apply.sh \
            && mkdir -p /usr/lib/systemd/system/multi-user.target.wants /usr/etc \
            && ln -sf ../usb-hub-poweron.service /usr/lib/systemd/system/multi-user.target.wants/usb-hub-poweron.service \
-           && ln -sf ../oxp-rgb.service /usr/lib/systemd/system/multi-user.target.wants/oxp-rgb.service \
-           && (systemd-hwdb update || udevadm hwdb --update || true)
+           && ln -sf ../oxp-rgb.service /usr/lib/systemd/system/multi-user.target.wants/oxp-rgb.service
 
-          # Boot fix: add removable-media GRUB fallback that jumps to Fedora GRUB config.
+          # Boot fix for systems that drop to grub>
           RUN mkdir -p /usr/lib/ostree-boot/efi/EFI/BOOT \
            && cat > /usr/lib/ostree-boot/efi/EFI/BOOT/grub.cfg <<'BOOTEOF'
           search --no-floppy --file --set=root /EFI/fedora/grub.cfg
           configfile ($root)/EFI/fedora/grub.cfg
           BOOTEOF
 
-          # Best-effort fallback EFI binary for firmware/GRUB paths that expect BOOTX64.EFI.
           RUN if [ -f /usr/lib/ostree-boot/efi/EFI/fedora/shimx64.efi ]; then \
                 cp -f /usr/lib/ostree-boot/efi/EFI/fedora/shimx64.efi /usr/lib/ostree-boot/efi/EFI/BOOT/BOOTX64.EFI; \
               elif [ -f /usr/lib/ostree-boot/efi/EFI/fedora/grubx64.efi ]; then \
@@ -255,7 +276,7 @@ jobs:
               fi
           EOF
 
-      - name: Build derived G1 image
+      - name: Build derived G1 payload
         shell: bash
         run: |
           set -euxo pipefail
@@ -263,10 +284,11 @@ jobs:
             --pull \
             --security-opt label=disable \
             --build-arg BASE_TAG="${BASE_TAG}" \
+            -f g1-image/Containerfile \
             -t localhost/derived-g1-img \
-            g1-image
+            .
 
-      - name: Verify derived image contents
+      - name: Quick verify payload
         shell: bash
         run: |
           set -euxo pipefail
@@ -274,64 +296,12 @@ jobs:
           sudo podman run --rm localhost/derived-g1-img test -f /usr/lib/udev/hwdb.d/61-sensor-local.hwdb
           sudo podman run --rm localhost/derived-g1-img rpm -q kernel-core
 
-      - name: Apply OCI and boot labels
-        shell: bash
-        run: |
-          set -euxo pipefail
-          CID=$(sudo buildah from localhost/derived-g1-img)
-          sudo buildah config \
-            --label "org.opencontainers.image.title=Bazzite Deck G1" \
-            --label "org.opencontainers.image.description=Bazzite Deck with OneXPlayer G1 fixes" \
-            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
-            --label "org.opencontainers.image.url=https://github.com/${{ github.repository }}" \
-            --label "org.opencontainers.image.revision=${{ github.sha }}" \
-            --label "org.opencontainers.image.version=${BASE_TAG}-g1" \
-            --label "ostree.bootable=true" \
-            "${CID}"
-          sudo buildah commit --identity-label=false --rm "${CID}" localhost/derived-g1-img
-
-      - name: Rechunk derived image
-        shell: bash
-        run: |
-          set -euxo pipefail
-          RECHUNK_DIR="$(mktemp -d)"
-
-          sudo podman run --rm \
-            --pull=never \
-            --privileged \
-            --mount=type=image,src=localhost/derived-g1-img,target=/rpm-ostree \
-            --volume "${RECHUNK_DIR}:/run/out:Z" \
-            --entrypoint /usr/bin/rpm-ostree \
-            localhost/derived-g1-img \
-            compose build-chunked-oci \
-            --bootc --max-layers 127 --format-version 2 \
-            --label "org.opencontainers.image.title=Bazzite Deck G1" \
-            --label "org.opencontainers.image.description=Bazzite Deck with OneXPlayer G1 fixes" \
-            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
-            --label "org.opencontainers.image.revision=${{ github.sha }}" \
-            --label "org.opencontainers.image.version=${BASE_TAG}-g1" \
-            --label "ostree.bootable=true" \
-            --rootfs /rpm-ostree \
-            --output "oci-archive:/run/out/chunked.oci"
-
-          sudo podman rmi -f localhost/derived-g1-img || true
-          CHUNKED=$(sudo podman pull "oci-archive:${RECHUNK_DIR}/chunked.oci")
-          sudo podman tag "${CHUNKED}" localhost/chunked-g1-img
-
-      - name: Verify rechunked payload
-        shell: bash
-        run: |
-          set -euxo pipefail
-          sudo podman image inspect localhost/chunked-g1-img > chunked-image.json
-          jq -r '.[0].RepoTags[0]' chunked-image.json
-          sudo podman run --rm localhost/chunked-g1-img rpm -q kernel-core
-
       - name: Build live installer payload
         shell: bash
         run: |
           set -euxo pipefail
           BASE_IMAGE="ghcr.io/ublue-os/bazzite:${BASE_TAG}"
-          INSTALL_IMAGE_PAYLOAD="localhost/chunked-g1-img"
+          INSTALL_IMAGE_PAYLOAD="localhost/derived-g1-img"
           FLATPAK_DIR_SHORTNAME="kde_flatpaks"
 
           sudo env TMPDIR=/mnt/podman-storage/tmp podman build \
@@ -340,9 +310,10 @@ jobs:
             --build-arg BASE_IMAGE="${BASE_IMAGE}" \
             --build-arg INSTALL_IMAGE_PAYLOAD="${INSTALL_IMAGE_PAYLOAD}" \
             --build-arg FLATPAK_DIR_SHORTNAME="${FLATPAK_DIR_SHORTNAME}" \
-            -t localhost/payload:latest installer/
+            -t localhost/payload:latest \
+            installer/
 
-      - name: Verify live installer payload
+      - name: Quick verify installer payload
         shell: bash
         run: |
           set -euxo pipefail
@@ -350,7 +321,7 @@ jobs:
           jq -r '.[0].RepoTags[0]' payload-image.json
           sudo podman run --rm localhost/payload:latest test -f /usr/lib/bootc-image-builder/iso.yaml
 
-      - name: Build Live ISO with New Installer
+      - name: Build ISO with New Installer
         uses: Zeglius/titanoboa@revamp-pr
         id: build
         with:
