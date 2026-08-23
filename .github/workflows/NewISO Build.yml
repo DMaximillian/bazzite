@@ -1,4 +1,4 @@
-name: New Build Bazzite Deck G1 ISO (44.20260820, fast new installer)
+name: Build Bazzite Deck G1 ISO (44.20260820, fast new installer)
 
 on:
   workflow_dispatch:
@@ -47,19 +47,20 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Prepare G1 files
+      - name: Prepare G1 files and custom installer
         shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
 
           mkdir -p g1-files
-          mkdir -p g1-image
-          mkdir -p installer/system_files/overrides/usr/lib/udev/hwdb.d
-          mkdir -p installer/system_files/overrides/usr/lib/udev/rules.d
-          mkdir -p installer/system_files/overrides/usr/local/bin
-          mkdir -p installer/system_files/overrides/usr/lib/systemd/system
-          mkdir -p installer/system_files/overrides/usr/lib/systemd/system/multi-user.target.wants
-          mkdir -p installer/system_files/overrides/usr/etc
+          cp -a installer installer-g1
+
+          mkdir -p installer-g1/system_files/overrides/usr/lib/udev/hwdb.d
+          mkdir -p installer-g1/system_files/overrides/usr/lib/udev/rules.d
+          mkdir -p installer-g1/system_files/overrides/usr/local/bin
+          mkdir -p installer-g1/system_files/overrides/usr/lib/systemd/system
+          mkdir -p installer-g1/system_files/overrides/usr/lib/systemd/system/multi-user.target.wants
+          mkdir -p installer-g1/system_files/overrides/usr/etc
 
           cat > g1-files/61-sensor-local.hwdb <<'EOF'
           # OneXPlayer G1 A — bmi260 accelerometer is mounted 180° vs the panel.
@@ -223,85 +224,172 @@ jobs:
           WantedBy=multi-user.target
           EOF
 
-          cp g1-files/61-sensor-local.hwdb installer/system_files/overrides/usr/lib/udev/hwdb.d/
-          cp g1-files/62-amira-kbd-fkeys.hwdb installer/system_files/overrides/usr/lib/udev/hwdb.d/
-          cp g1-files/71-controller-access.rules installer/system_files/overrides/usr/lib/udev/rules.d/
-          cp g1-files/99-usb-autosuspend.rules installer/system_files/overrides/usr/lib/udev/rules.d/
-          cp g1-files/usb-hub-poweron.sh installer/system_files/overrides/usr/local/bin/
-          cp g1-files/usb-hub-poweron.service installer/system_files/overrides/usr/lib/systemd/system/
-          cp g1-files/oxp-rgb.py installer/system_files/overrides/usr/local/bin/
-          cp g1-files/oxp-rgb-apply.sh installer/system_files/overrides/usr/local/bin/
-          cp g1-files/oxp-rgb.service installer/system_files/overrides/usr/lib/systemd/system/
-          cp g1-files/oxp-rgb.conf installer/system_files/overrides/usr/etc/
+          cp g1-files/61-sensor-local.hwdb installer-g1/system_files/overrides/usr/lib/udev/hwdb.d/
+          cp g1-files/62-amira-kbd-fkeys.hwdb installer-g1/system_files/overrides/usr/lib/udev/hwdb.d/
+          cp g1-files/71-controller-access.rules installer-g1/system_files/overrides/usr/lib/udev/rules.d/
+          cp g1-files/99-usb-autosuspend.rules installer-g1/system_files/overrides/usr/lib/udev/rules.d/
+          cp g1-files/usb-hub-poweron.sh installer-g1/system_files/overrides/usr/local/bin/
+          cp g1-files/usb-hub-poweron.service installer-g1/system_files/overrides/usr/lib/systemd/system/
+          cp g1-files/oxp-rgb.py installer-g1/system_files/overrides/usr/local/bin/
+          cp g1-files/oxp-rgb-apply.sh installer-g1/system_files/overrides/usr/local/bin/
+          cp g1-files/oxp-rgb.service installer-g1/system_files/overrides/usr/lib/systemd/system/
+          cp g1-files/oxp-rgb.conf installer-g1/system_files/overrides/usr/etc/
 
-          ln -sf ../usb-hub-poweron.service installer/system_files/overrides/usr/lib/systemd/system/multi-user.target.wants/usb-hub-poweron.service
-          ln -sf ../oxp-rgb.service installer/system_files/overrides/usr/lib/systemd/system/multi-user.target.wants/oxp-rgb.service
+          ln -sf ../usb-hub-poweron.service installer-g1/system_files/overrides/usr/lib/systemd/system/multi-user.target.wants/usb-hub-poweron.service
+          ln -sf ../oxp-rgb.service installer-g1/system_files/overrides/usr/lib/systemd/system/multi-user.target.wants/oxp-rgb.service
 
-          cat > g1-image/Containerfile <<'EOF'
-          ARG BASE_TAG=44.20260820
-          FROM ghcr.io/ublue-os/bazzite-deck:${BASE_TAG}
+          cat > installer-g1/build.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -exo pipefail
 
-          COPY ../g1-files/61-sensor-local.hwdb /usr/lib/udev/hwdb.d/61-sensor-local.hwdb
-          COPY ../g1-files/62-amira-kbd-fkeys.hwdb /usr/lib/udev/hwdb.d/62-amira-kbd-fkeys.hwdb
-          COPY ../g1-files/71-controller-access.rules /usr/lib/udev/rules.d/71-controller-access.rules
-          COPY ../g1-files/99-usb-autosuspend.rules /usr/lib/udev/rules.d/99-usb-autosuspend.rules
+          { export PS4='+( ${BASH_SOURCE}:${LINENO} ): ${FUNCNAME[0]:+${FUNCNAME[0]}(): }'; } 2>/dev/null
 
-          COPY ../g1-files/usb-hub-poweron.sh /usr/local/bin/usb-hub-poweron.sh
-          COPY ../g1-files/usb-hub-poweron.service /usr/lib/systemd/system/usb-hub-poweron.service
+          SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          BASE_IMAGE=${BASE_IMAGE:?}
+          INSTALL_IMAGE_PAYLOAD=${INSTALL_IMAGE_PAYLOAD:?}
+          FLATPAK_DIR_SHORTNAME=${FLATPAK_DIR_SHORTNAME:?}
+          FINAL_PAYLOAD_REF="bazzite-deck-g1:latest"
 
-          COPY ../g1-files/oxp-rgb.py /usr/local/bin/oxp-rgb.py
-          COPY ../g1-files/oxp-rgb-apply.sh /usr/local/bin/oxp-rgb-apply.sh
-          COPY ../g1-files/oxp-rgb.service /usr/lib/systemd/system/oxp-rgb.service
-          COPY ../g1-files/oxp-rgb.conf /usr/etc/oxp-rgb.conf
+          mkdir -p "$(realpath /root)"
+          mount -o remount,rw /proc/sys
 
-          RUN chmod 0755 \
-                /usr/local/bin/usb-hub-poweron.sh \
-                /usr/local/bin/oxp-rgb.py \
-                /usr/local/bin/oxp-rgb-apply.sh \
-           && mkdir -p /usr/lib/systemd/system/multi-user.target.wants /usr/etc \
-           && ln -sf ../usb-hub-poweron.service /usr/lib/systemd/system/multi-user.target.wants/usb-hub-poweron.service \
-           && ln -sf ../oxp-rgb.service /usr/lib/systemd/system/multi-user.target.wants/oxp-rgb.service
+          curl --retry 3 -Lo /etc/flatpak/remotes.d/flathub.flatpakrepo https://dl.flathub.org/repo/flathub.flatpakrepo
+          xargs -r flatpak install -y --noninteractive <"/src/$FLATPAK_DIR_SHORTNAME/flatpaks"
 
-          # Boot fix for systems that drop to grub>
-          RUN mkdir -p /usr/lib/ostree-boot/efi/EFI/BOOT \
-           && cat > /usr/lib/ostree-boot/efi/EFI/BOOT/grub.cfg <<'BOOTEOF'
+          if mountpoint -q /usr/lib/containers/storage; then
+              podman save --format oci-archive "$INSTALL_IMAGE_PAYLOAD" | podman load --storage-opt additionalimagestore=''
+          else
+              podman pull "$INSTALL_IMAGE_PAYLOAD"
+          fi
+
+          ctr=$(buildah from "$INSTALL_IMAGE_PAYLOAD")
+          buildah copy "$ctr" /src/../g1-files/61-sensor-local.hwdb /usr/lib/udev/hwdb.d/61-sensor-local.hwdb
+          buildah copy "$ctr" /src/../g1-files/62-amira-kbd-fkeys.hwdb /usr/lib/udev/hwdb.d/62-amira-kbd-fkeys.hwdb
+          buildah copy "$ctr" /src/../g1-files/71-controller-access.rules /usr/lib/udev/rules.d/71-controller-access.rules
+          buildah copy "$ctr" /src/../g1-files/99-usb-autosuspend.rules /usr/lib/udev/rules.d/99-usb-autosuspend.rules
+          buildah copy "$ctr" /src/../g1-files/usb-hub-poweron.sh /usr/local/bin/usb-hub-poweron.sh
+          buildah copy "$ctr" /src/../g1-files/usb-hub-poweron.service /usr/lib/systemd/system/usb-hub-poweron.service
+          buildah copy "$ctr" /src/../g1-files/oxp-rgb.py /usr/local/bin/oxp-rgb.py
+          buildah copy "$ctr" /src/../g1-files/oxp-rgb-apply.sh /usr/local/bin/oxp-rgb-apply.sh
+          buildah copy "$ctr" /src/../g1-files/oxp-rgb.service /usr/lib/systemd/system/oxp-rgb.service
+          buildah copy "$ctr" /src/../g1-files/oxp-rgb.conf /usr/etc/oxp-rgb.conf
+
+          buildah run "$ctr" -- chmod 0755 /usr/local/bin/usb-hub-poweron.sh /usr/local/bin/oxp-rgb.py /usr/local/bin/oxp-rgb-apply.sh
+          buildah run "$ctr" -- mkdir -p /usr/lib/systemd/system/multi-user.target.wants /usr/lib/ostree-boot/efi/EFI/BOOT
+          buildah run "$ctr" -- ln -sf ../usb-hub-poweron.service /usr/lib/systemd/system/multi-user.target.wants/usb-hub-poweron.service
+          buildah run "$ctr" -- ln -sf ../oxp-rgb.service /usr/lib/systemd/system/multi-user.target.wants/oxp-rgb.service
+
+          cat > /tmp/grub-g1-fallback.cfg <<'GRUBEOF'
           search --no-floppy --file --set=root /EFI/fedora/grub.cfg
           configfile ($root)/EFI/fedora/grub.cfg
-          BOOTEOF
+          GRUBEOF
+          buildah copy "$ctr" /tmp/grub-g1-fallback.cfg /usr/lib/ostree-boot/efi/EFI/BOOT/grub.cfg
 
-          RUN if [ -f /usr/lib/ostree-boot/efi/EFI/fedora/shimx64.efi ]; then \
-                cp -f /usr/lib/ostree-boot/efi/EFI/fedora/shimx64.efi /usr/lib/ostree-boot/efi/EFI/BOOT/BOOTX64.EFI; \
-              elif [ -f /usr/lib/ostree-boot/efi/EFI/fedora/grubx64.efi ]; then \
-                cp -f /usr/lib/ostree-boot/efi/EFI/fedora/grubx64.efi /usr/lib/ostree-boot/efi/EFI/BOOT/BOOTX64.EFI; \
-              fi
+          buildah run "$ctr" -- bash -lc '
+            if [ -f /usr/lib/ostree-boot/efi/EFI/fedora/shimx64.efi ]; then
+              cp -f /usr/lib/ostree-boot/efi/EFI/fedora/shimx64.efi /usr/lib/ostree-boot/efi/EFI/BOOT/BOOTX64.EFI
+            elif [ -f /usr/lib/ostree-boot/efi/EFI/fedora/grubx64.efi ]; then
+              cp -f /usr/lib/ostree-boot/efi/EFI/fedora/grubx64.efi /usr/lib/ostree-boot/efi/EFI/BOOT/BOOTX64.EFI
+            fi
+          '
+
+          buildah config \
+            --label "org.opencontainers.image.title=Bazzite Deck G1" \
+            --label "org.opencontainers.image.description=Bazzite Deck with OneXPlayer G1 fixes" \
+            --label "ostree.bootable=true" \
+            "$ctr"
+
+          buildah commit --identity-label=false "$ctr" "$FINAL_PAYLOAD_REF"
+          buildah rm "$ctr"
+
+          if [[ ${BASE_IMAGE} == *-gnome* ]]; then
+              desktop_env="gnome"
+          else
+              desktop_env="kde"
+          fi
+
+          echo "Copying shared system files..."
+          cp -a /src/system_files/shared/. /
+
+          if [[ "$desktop_env" == "gnome" ]]; then
+              echo "Copying GNOME-specific system files..."
+              cp -a /src/system_files/gnome/. /
+          elif [[ "$desktop_env" == "kde" ]]; then
+              echo "Copying KDE-specific system files..."
+              cp -a /src/system_files/kde/. /
+          fi
+
+          "$SCRIPT_DIR/titanoboa_hook_preinitramfs.sh"
+
+          dnf install -y dracut-live
+          kernel=$(kernel-install list --json pretty | jq -r '.[] | select(.has_kernel == true) | .version')
+          DRACUT_NO_XATTR=1 dracut -v --force --zstd --reproducible --no-hostonly \
+              --add "dmsquash-live dmsquash-live-autooverlay" \
+              "/usr/lib/modules/${kernel}/initramfs.img" "${kernel}"
+
+          dnf install -y livesys-scripts
+          if [[ ${BASE_IMAGE} == *-gnome* ]]; then
+              sed -i "s/^livesys_session=.*/livesys_session=gnome/" /etc/sysconfig/livesys
+          else
+              sed -i "s/^livesys_session=.*/livesys_session=kde/" /etc/sysconfig/livesys
+          fi
+          systemctl enable livesys.service livesys-late.service
+
+          "$SCRIPT_DIR/titanoboa_hook_postrootfs.sh"
+
+          echo "Copying overrides of system files..."
+          cp -af /src/system_files/overrides/. /
+
+          dnf install -y grub2-efi-x64-cdboot
+          mkdir -p /boot/efi
+          cp -av /usr/lib/efi/*/*/EFI /boot/efi/
+          cp -v /boot/efi/EFI/fedora/grubx64.efi /boot/efi/EFI/BOOT/fbx64.efi || true
+
+          rm -f /etc/localtime
+          systemd-firstboot --timezone UTC
+
+          rm -rf /var/tmp
+          mkdir /var/tmp
+          cat >/etc/systemd/system/var-tmp.mount <<'MOUNTEOF'
+          [Unit]
+          Description=Larger tmpfs for /var/tmp on live system
+
+          [Mount]
+          What=tmpfs
+          Where=/var/tmp
+          Type=tmpfs
+          Options=size=50%%,nr_inodes=1m,x-systemd.graceful-option=usrquota
+
+          [Install]
+          WantedBy=local-fs.target
+          MOUNTEOF
+          systemctl enable var-tmp.mount
+
+          cat >/etc/systemd/system/var-lib-flatpak.mount <<'MOUNTEOF'
+          [Mount]
+          Type=none
+          What=/var/lib/flatpak
+          Where=/var/lib/flatpak
+          Options=bind,ro
+
+          [Install]
+          WantedBy=multi-user.target
+          MOUNTEOF
+          systemctl enable var-lib-flatpak.mount
+
+          mkdir -p /usr/lib/bootc-image-builder
+          cp /src/iso.yaml /usr/lib/bootc-image-builder/iso.yaml
+
+          dnf clean all
           EOF
-
-      - name: Build derived G1 payload
-        shell: bash
-        run: |
-          set -euxo pipefail
-          sudo env TMPDIR=/mnt/podman-storage/tmp podman build \
-            --pull \
-            --security-opt label=disable \
-            --build-arg BASE_TAG="${BASE_TAG}" \
-            -f g1-image/Containerfile \
-            -t localhost/derived-g1-img \
-            .
-
-      - name: Quick verify payload
-        shell: bash
-        run: |
-          set -euxo pipefail
-          sudo podman run --rm localhost/derived-g1-img test -f /usr/lib/ostree-boot/efi/EFI/BOOT/grub.cfg
-          sudo podman run --rm localhost/derived-g1-img test -f /usr/lib/udev/hwdb.d/61-sensor-local.hwdb
-          sudo podman run --rm localhost/derived-g1-img rpm -q kernel-core
+          chmod +x installer-g1/build.sh
 
       - name: Build live installer payload
         shell: bash
         run: |
           set -euxo pipefail
           BASE_IMAGE="ghcr.io/ublue-os/bazzite:${BASE_TAG}"
-          INSTALL_IMAGE_PAYLOAD="localhost/derived-g1-img"
+          INSTALL_IMAGE_PAYLOAD="ghcr.io/ublue-os/bazzite-deck:${BASE_TAG}"
           FLATPAK_DIR_SHORTNAME="kde_flatpaks"
 
           sudo env TMPDIR=/mnt/podman-storage/tmp podman build \
@@ -311,9 +399,9 @@ jobs:
             --build-arg INSTALL_IMAGE_PAYLOAD="${INSTALL_IMAGE_PAYLOAD}" \
             --build-arg FLATPAK_DIR_SHORTNAME="${FLATPAK_DIR_SHORTNAME}" \
             -t localhost/payload:latest \
-            installer/
+            installer-g1/
 
-      - name: Quick verify installer payload
+      - name: Quick verify payload
         shell: bash
         run: |
           set -euxo pipefail
