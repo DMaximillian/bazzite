@@ -57,9 +57,9 @@ jobs:
 
           mkdir -p g1-files
           mkdir -p installer-g1/system_files/overrides/usr/share/bazzite-g1
+          mkdir -p installer-g1/system_files/overrides/usr/share/bazzite-g1/bin
           mkdir -p installer-g1/system_files/overrides/usr/lib/udev/hwdb.d
           mkdir -p installer-g1/system_files/overrides/usr/lib/udev/rules.d
-          mkdir -p installer-g1/system_files/overrides/usr/local/bin
           mkdir -p installer-g1/system_files/overrides/usr/lib/systemd/system
           mkdir -p installer-g1/system_files/overrides/usr/lib/systemd/system/multi-user.target.wants
           mkdir -p installer-g1/system_files/overrides/usr/etc
@@ -231,21 +231,19 @@ jobs:
           install -m 0644 g1-files/62-amira-kbd-fkeys.hwdb installer-g1/system_files/overrides/usr/share/bazzite-g1/62-amira-kbd-fkeys.hwdb
           install -m 0644 g1-files/71-controller-access.rules installer-g1/system_files/overrides/usr/share/bazzite-g1/71-controller-access.rules
           install -m 0644 g1-files/99-usb-autosuspend.rules installer-g1/system_files/overrides/usr/share/bazzite-g1/99-usb-autosuspend.rules
-          install -m 0755 g1-files/usb-hub-poweron.sh installer-g1/system_files/overrides/usr/share/bazzite-g1/usb-hub-poweron.sh
           install -m 0644 g1-files/usb-hub-poweron.service installer-g1/system_files/overrides/usr/share/bazzite-g1/usb-hub-poweron.service
-          install -m 0755 g1-files/oxp-rgb.py installer-g1/system_files/overrides/usr/share/bazzite-g1/oxp-rgb.py
-          install -m 0755 g1-files/oxp-rgb-apply.sh installer-g1/system_files/overrides/usr/share/bazzite-g1/oxp-rgb-apply.sh
           install -m 0644 g1-files/oxp-rgb.service installer-g1/system_files/overrides/usr/share/bazzite-g1/oxp-rgb.service
           install -m 0644 g1-files/oxp-rgb.conf installer-g1/system_files/overrides/usr/share/bazzite-g1/oxp-rgb.conf
+
+          install -m 0755 g1-files/usb-hub-poweron.sh installer-g1/system_files/overrides/usr/share/bazzite-g1/bin/usb-hub-poweron.sh
+          install -m 0755 g1-files/oxp-rgb.py installer-g1/system_files/overrides/usr/share/bazzite-g1/bin/oxp-rgb.py
+          install -m 0755 g1-files/oxp-rgb-apply.sh installer-g1/system_files/overrides/usr/share/bazzite-g1/bin/oxp-rgb-apply.sh
 
           install -m 0644 g1-files/61-sensor-local.hwdb installer-g1/system_files/overrides/usr/lib/udev/hwdb.d/61-sensor-local.hwdb
           install -m 0644 g1-files/62-amira-kbd-fkeys.hwdb installer-g1/system_files/overrides/usr/lib/udev/hwdb.d/62-amira-kbd-fkeys.hwdb
           install -m 0644 g1-files/71-controller-access.rules installer-g1/system_files/overrides/usr/lib/udev/rules.d/71-controller-access.rules
           install -m 0644 g1-files/99-usb-autosuspend.rules installer-g1/system_files/overrides/usr/lib/udev/rules.d/99-usb-autosuspend.rules
-          install -m 0755 g1-files/usb-hub-poweron.sh installer-g1/system_files/overrides/usr/local/bin/usb-hub-poweron.sh
           install -m 0644 g1-files/usb-hub-poweron.service installer-g1/system_files/overrides/usr/lib/systemd/system/usb-hub-poweron.service
-          install -m 0755 g1-files/oxp-rgb.py installer-g1/system_files/overrides/usr/local/bin/oxp-rgb.py
-          install -m 0755 g1-files/oxp-rgb-apply.sh installer-g1/system_files/overrides/usr/local/bin/oxp-rgb-apply.sh
           install -m 0644 g1-files/oxp-rgb.service installer-g1/system_files/overrides/usr/lib/systemd/system/oxp-rgb.service
           install -m 0644 g1-files/oxp-rgb.conf installer-g1/system_files/overrides/usr/etc/oxp-rgb.conf
 
@@ -259,6 +257,7 @@ jobs:
           set -euxo pipefail
 
           SRC=/usr/share/bazzite-g1
+          SRCBIN=/usr/share/bazzite-g1/bin
           SYSROOT=/mnt/sysroot
 
           install -D -m 0644 "$SRC/61-sensor-local.hwdb" "$SYSROOT/usr/lib/udev/hwdb.d/61-sensor-local.hwdb"
@@ -266,11 +265,11 @@ jobs:
           install -D -m 0644 "$SRC/71-controller-access.rules" "$SYSROOT/usr/lib/udev/rules.d/71-controller-access.rules"
           install -D -m 0644 "$SRC/99-usb-autosuspend.rules" "$SYSROOT/usr/lib/udev/rules.d/99-usb-autosuspend.rules"
 
-          install -D -m 0755 "$SRC/usb-hub-poweron.sh" "$SYSROOT/usr/local/bin/usb-hub-poweron.sh"
+          install -D -m 0755 "$SRCBIN/usb-hub-poweron.sh" "$SYSROOT/usr/local/bin/usb-hub-poweron.sh"
           install -D -m 0644 "$SRC/usb-hub-poweron.service" "$SYSROOT/usr/lib/systemd/system/usb-hub-poweron.service"
 
-          install -D -m 0755 "$SRC/oxp-rgb.py" "$SYSROOT/usr/local/bin/oxp-rgb.py"
-          install -D -m 0755 "$SRC/oxp-rgb-apply.sh" "$SYSROOT/usr/local/bin/oxp-rgb-apply.sh"
+          install -D -m 0755 "$SRCBIN/oxp-rgb.py" "$SYSROOT/usr/local/bin/oxp-rgb.py"
+          install -D -m 0755 "$SRCBIN/oxp-rgb-apply.sh" "$SYSROOT/usr/local/bin/oxp-rgb-apply.sh"
           install -D -m 0644 "$SRC/oxp-rgb.service" "$SYSROOT/usr/lib/systemd/system/oxp-rgb.service"
           install -D -m 0644 "$SRC/oxp-rgb.conf" "$SYSROOT/usr/etc/oxp-rgb.conf"
 
@@ -322,6 +321,7 @@ jobs:
           jq -r '.[0].RepoTags[0]' payload-image.json
           sudo podman run --rm localhost/payload:latest test -f /usr/lib/bootc-image-builder/iso.yaml
           sudo podman run --rm localhost/payload:latest test -f /usr/share/anaconda/post-scripts/g1-fixes.ks
+          sudo podman run --rm localhost/payload:latest test -f /usr/share/bazzite-g1/bin/oxp-rgb.py
 
       - name: Build ISO with New Installer
         uses: Zeglius/titanoboa@revamp-pr
