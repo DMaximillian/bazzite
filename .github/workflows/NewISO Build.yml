@@ -1,4 +1,4 @@
-name: Build Bazzite Deck G1 ISO (44.20260820, lite new installer)
+name: Build Bazzite Deck G1 ISO (44.20260820, minimal new installer)
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}-g1-lite
+  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}-g1-minimal
   cancel-in-progress: true
 
 jobs:
@@ -57,43 +57,13 @@ jobs:
 
           mkdir -p g1-files
           mkdir -p installer-g1/system_files/overrides/usr/share/bazzite-g1
-          mkdir -p installer-g1/system_files/overrides/usr/lib/udev/hwdb.d
-          mkdir -p installer-g1/system_files/overrides/usr/lib/udev/rules.d
-
-          cat > g1-files/61-sensor-local.hwdb <<'EOF'
-          # OneXPlayer G1 A — bmi260 accelerometer is mounted 180° vs the panel.
-          sensor:modalias:acpi:BMI0160*:dmi:*:svnONE-NETBOOK:pnONEXPLAYERG1A:*
-           ACCEL_MOUNT_MATRIX=-1, 0, 0; 0, -1, 0; 0, 0, 1
-          EOF
-
-          cat > g1-files/62-amira-kbd-fkeys.hwdb <<'EOF'
-          # AMIRA keyboard mode-toggle emits spurious F13/F14/F17.
-          evdev:input:b0003v6080p8060*
-           KEYBOARD_KEY_70068=reserved
-           KEYBOARD_KEY_70069=reserved
-           KEYBOARD_KEY_7006c=reserved
-          EOF
 
           cat > g1-files/71-controller-access.rules <<'EOF'
           SUBSYSTEM=="input", ENV{ID_INPUT_JOYSTICK}=="1", TAG+="uaccess", MODE="0660", GROUP="input"
           KERNEL=="js[0-9]*", SUBSYSTEM=="input", TAG+="uaccess", MODE="0660", GROUP="input"
           EOF
 
-          cat > g1-files/99-usb-autosuspend.rules <<'EOF'
-          ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="05e3", ATTR{idProduct}=="0610", ATTR{power/control}="on", ATTR{power/autosuspend_delay_ms}="0"
-          ACTION=="add", SUBSYSTEM=="usb", ATTR{bDeviceClass}=="09", ATTR{power/control}="on"
-          ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="6080", ATTR{idProduct}=="8060", ATTR{power/control}="on", ATTR{power/autosuspend_delay_ms}="0"
-          EOF
-
-          install -m 0644 g1-files/61-sensor-local.hwdb installer-g1/system_files/overrides/usr/share/bazzite-g1/61-sensor-local.hwdb
-          install -m 0644 g1-files/62-amira-kbd-fkeys.hwdb installer-g1/system_files/overrides/usr/share/bazzite-g1/62-amira-kbd-fkeys.hwdb
           install -m 0644 g1-files/71-controller-access.rules installer-g1/system_files/overrides/usr/share/bazzite-g1/71-controller-access.rules
-          install -m 0644 g1-files/99-usb-autosuspend.rules installer-g1/system_files/overrides/usr/share/bazzite-g1/99-usb-autosuspend.rules
-
-          install -m 0644 g1-files/61-sensor-local.hwdb installer-g1/system_files/overrides/usr/lib/udev/hwdb.d/61-sensor-local.hwdb
-          install -m 0644 g1-files/62-amira-kbd-fkeys.hwdb installer-g1/system_files/overrides/usr/lib/udev/hwdb.d/62-amira-kbd-fkeys.hwdb
-          install -m 0644 g1-files/71-controller-access.rules installer-g1/system_files/overrides/usr/lib/udev/rules.d/71-controller-access.rules
-          install -m 0644 g1-files/99-usb-autosuspend.rules installer-g1/system_files/overrides/usr/lib/udev/rules.d/99-usb-autosuspend.rules
 
           cat >> installer-g1/build.sh <<'EOF'
 
@@ -104,10 +74,7 @@ jobs:
           SRC=/usr/share/bazzite-g1
           SYSROOT=/mnt/sysroot
 
-          install -D -m 0644 "$SRC/61-sensor-local.hwdb" "$SYSROOT/usr/lib/udev/hwdb.d/61-sensor-local.hwdb"
-          install -D -m 0644 "$SRC/62-amira-kbd-fkeys.hwdb" "$SYSROOT/usr/lib/udev/hwdb.d/62-amira-kbd-fkeys.hwdb"
           install -D -m 0644 "$SRC/71-controller-access.rules" "$SYSROOT/usr/lib/udev/rules.d/71-controller-access.rules"
-          install -D -m 0644 "$SRC/99-usb-autosuspend.rules" "$SYSROOT/usr/lib/udev/rules.d/99-usb-autosuspend.rules"
 
           mkdir -p "$SYSROOT/boot/efi/EFI/BOOT"
           cat > "$SYSROOT/boot/efi/EFI/BOOT/grub.cfg" <<'GRUBEOF'
@@ -120,8 +87,6 @@ jobs:
           elif [ -f "$SYSROOT/boot/efi/EFI/fedora/grubx64.efi" ]; then
             cp -f "$SYSROOT/boot/efi/EFI/fedora/grubx64.efi" "$SYSROOT/boot/efi/EFI/BOOT/BOOTX64.EFI"
           fi
-
-          chroot "$SYSROOT" bash -lc 'systemd-hwdb update || udevadm hwdb --update || true'
           %end
           KSEOF
 
@@ -153,7 +118,7 @@ jobs:
           jq -r '.[0].RepoTags[0]' payload-image.json
           sudo podman run --rm localhost/payload:latest test -f /usr/lib/bootc-image-builder/iso.yaml
           sudo podman run --rm localhost/payload:latest test -f /usr/share/anaconda/post-scripts/g1-fixes.ks
-          sudo podman run --rm localhost/payload:latest test -f /usr/share/bazzite-g1/61-sensor-local.hwdb
+          sudo podman run --rm localhost/payload:latest test -f /usr/share/bazzite-g1/71-controller-access.rules
 
       - name: Build ISO with New Installer
         uses: Zeglius/titanoboa@revamp-pr
