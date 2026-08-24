@@ -1,4 +1,4 @@
-name: Build Bazzite Deck G1 ISO (44.20260820, fast new installer)
+name: Build Bazzite Deck G1 ISO (44.20260820, lite new installer)
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}-g1-fast
+  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}-g1-lite
   cancel-in-progress: true
 
 jobs:
@@ -57,12 +57,8 @@ jobs:
 
           mkdir -p g1-files
           mkdir -p installer-g1/system_files/overrides/usr/share/bazzite-g1
-          mkdir -p installer-g1/system_files/overrides/usr/share/bazzite-g1/bin
           mkdir -p installer-g1/system_files/overrides/usr/lib/udev/hwdb.d
           mkdir -p installer-g1/system_files/overrides/usr/lib/udev/rules.d
-          mkdir -p installer-g1/system_files/overrides/usr/lib/systemd/system
-          mkdir -p installer-g1/system_files/overrides/usr/lib/systemd/system/multi-user.target.wants
-          mkdir -p installer-g1/system_files/overrides/usr/etc
 
           cat > g1-files/61-sensor-local.hwdb <<'EOF'
           # OneXPlayer G1 A — bmi260 accelerometer is mounted 180° vs the panel.
@@ -89,166 +85,15 @@ jobs:
           ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="6080", ATTR{idProduct}=="8060", ATTR{power/control}="on", ATTR{power/autosuspend_delay_ms}="0"
           EOF
 
-          cat > g1-files/usb-hub-poweron.sh <<'EOF'
-          #!/usr/bin/bash
-          set -euo pipefail
-          udevadm settle --timeout=60 || true
-          for d in /sys/bus/usb/devices/*/power/control; do
-              echo on > "$d" 2>/dev/null || true
-          done
-          EOF
-
-          cat > g1-files/usb-hub-poweron.service <<'EOF'
-          [Unit]
-          Description=Wait for USB devices then force hubs to stay powered
-          Before=gdm.service display-manager.service
-          After=systemd-udevd.service
-
-          [Service]
-          Type=oneshot
-          RemainAfterExit=yes
-          ExecStart=/usr/local/bin/usb-hub-poweron.sh
-
-          [Install]
-          WantedBy=multi-user.target
-          EOF
-
-          cat > g1-files/oxp-rgb.py <<'EOF'
-          #!/usr/bin/env python3
-          import configparser
-          import glob
-          import os
-          import sys
-          import time
-
-          CONF = "/etc/oxp-rgb.conf"
-          VID, PID = "1A2C", "B001"
-          EFFECTS = {
-              "aurora": 0x01, "flowing": 0x03, "neon": 0x05, "dreamy": 0x07,
-              "sun": 0x08, "cyberpunk": 0x09, "sunset": 0x0B,
-              "colorful": 0x0C, "monster_woke": 0x0D,
-          }
-          BRIGHT = {"low": 0x01, "medium": 0x03, "high": 0x04}
-
-          def gen_cmd(cid, cmd, idx=0x01, size=64):
-              base = bytes([cid, 0x3F, idx]) + bytes(cmd)
-              return base + bytes([0] * (size - len(base) - 2)) + bytes([0x3F, cid])
-
-          def gen_brightness(side, enabled, bc):
-              return gen_cmd(0xB8, [0xFD, side, 0x02, 1 if enabled else 0, 0x05, bc])
-
-          def gen_rgb_solid(r, g, b, side=0):
-              return gen_cmd(0xB8, [0xFE, side, 0x02] + 18 * [r, g, b] + [r, g])
-
-          def gen_rgb_mode(mc):
-              return gen_cmd(0xB8, [mc, 0x00, 0x02])
-
-          def find_dev():
-              for hr in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
-                  try:
-                      uevent = open(os.path.join(hr, "device/uevent")).read().upper()
-                  except OSError:
-                      continue
-                  if VID in uevent and PID in uevent:
-                      return "/dev/" + os.path.basename(hr)
-              return None
-
-          def main():
-              config = configparser.ConfigParser()
-              config.read(CONF)
-              rgb = config["rgb"] if config.has_section("rgb") else {}
-              mode = rgb.get("mode", "effect")
-              bc = BRIGHT.get(rgb.get("brightness", "high"), 0x04)
-
-              dev = find_dev()
-              if not dev:
-                  print("OXP RGB device not found", file=sys.stderr)
-                  sys.exit(1)
-
-              fd = os.open(dev, os.O_RDWR)
-
-              def write_cmd(cmd):
-                  os.write(fd, bytes(cmd))
-                  time.sleep(0.08)
-
-              write_cmd(gen_brightness(0, True, bc))
-              if mode == "solid":
-                  r = int(rgb.get("r", 0))
-                  g = int(rgb.get("g", 255))
-                  b = int(rgb.get("b", 0))
-                  for side in (0x00, 0x01, 0x02):
-                      write_cmd(gen_rgb_solid(r, g, b, side=side))
-              else:
-                  effect = rgb.get("effect", "aurora")
-                  write_cmd(gen_rgb_mode(EFFECTS.get(effect, 0x01)))
-
-              os.close(fd)
-
-          if __name__ == "__main__":
-              main()
-          EOF
-
-          cat > g1-files/oxp-rgb.conf <<'EOF'
-          [rgb]
-          mode = effect
-          effect = aurora
-          brightness = high
-          r = 0
-          g = 255
-          b = 0
-          EOF
-
-          cat > g1-files/oxp-rgb-apply.sh <<'EOF'
-          #!/usr/bin/bash
-          set -euo pipefail
-          for _ in $(seq 1 30); do
-              if /usr/local/bin/oxp-rgb.py; then
-                  exit 0
-              fi
-              sleep 2
-          done
-          exit 0
-          EOF
-
-          cat > g1-files/oxp-rgb.service <<'EOF'
-          [Unit]
-          Description=OneXPlayer G1 controller RGB workaround
-          After=graphical.target
-          Wants=graphical.target
-
-          [Service]
-          Type=oneshot
-          ExecStart=/usr/local/bin/oxp-rgb-apply.sh
-          RemainAfterExit=yes
-
-          [Install]
-          WantedBy=multi-user.target
-          EOF
-
-          chmod 0755 g1-files/usb-hub-poweron.sh g1-files/oxp-rgb.py g1-files/oxp-rgb-apply.sh
-
           install -m 0644 g1-files/61-sensor-local.hwdb installer-g1/system_files/overrides/usr/share/bazzite-g1/61-sensor-local.hwdb
           install -m 0644 g1-files/62-amira-kbd-fkeys.hwdb installer-g1/system_files/overrides/usr/share/bazzite-g1/62-amira-kbd-fkeys.hwdb
           install -m 0644 g1-files/71-controller-access.rules installer-g1/system_files/overrides/usr/share/bazzite-g1/71-controller-access.rules
           install -m 0644 g1-files/99-usb-autosuspend.rules installer-g1/system_files/overrides/usr/share/bazzite-g1/99-usb-autosuspend.rules
-          install -m 0644 g1-files/usb-hub-poweron.service installer-g1/system_files/overrides/usr/share/bazzite-g1/usb-hub-poweron.service
-          install -m 0644 g1-files/oxp-rgb.service installer-g1/system_files/overrides/usr/share/bazzite-g1/oxp-rgb.service
-          install -m 0644 g1-files/oxp-rgb.conf installer-g1/system_files/overrides/usr/share/bazzite-g1/oxp-rgb.conf
-
-          install -m 0755 g1-files/usb-hub-poweron.sh installer-g1/system_files/overrides/usr/share/bazzite-g1/bin/usb-hub-poweron.sh
-          install -m 0755 g1-files/oxp-rgb.py installer-g1/system_files/overrides/usr/share/bazzite-g1/bin/oxp-rgb.py
-          install -m 0755 g1-files/oxp-rgb-apply.sh installer-g1/system_files/overrides/usr/share/bazzite-g1/bin/oxp-rgb-apply.sh
 
           install -m 0644 g1-files/61-sensor-local.hwdb installer-g1/system_files/overrides/usr/lib/udev/hwdb.d/61-sensor-local.hwdb
           install -m 0644 g1-files/62-amira-kbd-fkeys.hwdb installer-g1/system_files/overrides/usr/lib/udev/hwdb.d/62-amira-kbd-fkeys.hwdb
           install -m 0644 g1-files/71-controller-access.rules installer-g1/system_files/overrides/usr/lib/udev/rules.d/71-controller-access.rules
           install -m 0644 g1-files/99-usb-autosuspend.rules installer-g1/system_files/overrides/usr/lib/udev/rules.d/99-usb-autosuspend.rules
-          install -m 0644 g1-files/usb-hub-poweron.service installer-g1/system_files/overrides/usr/lib/systemd/system/usb-hub-poweron.service
-          install -m 0644 g1-files/oxp-rgb.service installer-g1/system_files/overrides/usr/lib/systemd/system/oxp-rgb.service
-          install -m 0644 g1-files/oxp-rgb.conf installer-g1/system_files/overrides/usr/etc/oxp-rgb.conf
-
-          ln -sf ../usb-hub-poweron.service installer-g1/system_files/overrides/usr/lib/systemd/system/multi-user.target.wants/usb-hub-poweron.service
-          ln -sf ../oxp-rgb.service installer-g1/system_files/overrides/usr/lib/systemd/system/multi-user.target.wants/oxp-rgb.service
 
           cat >> installer-g1/build.sh <<'EOF'
 
@@ -257,25 +102,12 @@ jobs:
           set -euxo pipefail
 
           SRC=/usr/share/bazzite-g1
-          SRCBIN=/usr/share/bazzite-g1/bin
           SYSROOT=/mnt/sysroot
 
           install -D -m 0644 "$SRC/61-sensor-local.hwdb" "$SYSROOT/usr/lib/udev/hwdb.d/61-sensor-local.hwdb"
           install -D -m 0644 "$SRC/62-amira-kbd-fkeys.hwdb" "$SYSROOT/usr/lib/udev/hwdb.d/62-amira-kbd-fkeys.hwdb"
           install -D -m 0644 "$SRC/71-controller-access.rules" "$SYSROOT/usr/lib/udev/rules.d/71-controller-access.rules"
           install -D -m 0644 "$SRC/99-usb-autosuspend.rules" "$SYSROOT/usr/lib/udev/rules.d/99-usb-autosuspend.rules"
-
-          install -D -m 0755 "$SRCBIN/usb-hub-poweron.sh" "$SYSROOT/usr/local/bin/usb-hub-poweron.sh"
-          install -D -m 0644 "$SRC/usb-hub-poweron.service" "$SYSROOT/usr/lib/systemd/system/usb-hub-poweron.service"
-
-          install -D -m 0755 "$SRCBIN/oxp-rgb.py" "$SYSROOT/usr/local/bin/oxp-rgb.py"
-          install -D -m 0755 "$SRCBIN/oxp-rgb-apply.sh" "$SYSROOT/usr/local/bin/oxp-rgb-apply.sh"
-          install -D -m 0644 "$SRC/oxp-rgb.service" "$SYSROOT/usr/lib/systemd/system/oxp-rgb.service"
-          install -D -m 0644 "$SRC/oxp-rgb.conf" "$SYSROOT/usr/etc/oxp-rgb.conf"
-
-          mkdir -p "$SYSROOT/usr/lib/systemd/system/multi-user.target.wants"
-          ln -sf ../usb-hub-poweron.service "$SYSROOT/usr/lib/systemd/system/multi-user.target.wants/usb-hub-poweron.service"
-          ln -sf ../oxp-rgb.service "$SYSROOT/usr/lib/systemd/system/multi-user.target.wants/oxp-rgb.service"
 
           mkdir -p "$SYSROOT/boot/efi/EFI/BOOT"
           cat > "$SYSROOT/boot/efi/EFI/BOOT/grub.cfg" <<'GRUBEOF'
@@ -321,7 +153,7 @@ jobs:
           jq -r '.[0].RepoTags[0]' payload-image.json
           sudo podman run --rm localhost/payload:latest test -f /usr/lib/bootc-image-builder/iso.yaml
           sudo podman run --rm localhost/payload:latest test -f /usr/share/anaconda/post-scripts/g1-fixes.ks
-          sudo podman run --rm localhost/payload:latest test -f /usr/share/bazzite-g1/bin/oxp-rgb.py
+          sudo podman run --rm localhost/payload:latest test -f /usr/share/bazzite-g1/61-sensor-local.hwdb
 
       - name: Build ISO with New Installer
         uses: Zeglius/titanoboa@revamp-pr
